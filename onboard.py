@@ -274,12 +274,11 @@ def stream_subprocess(console: Console, label: str, cmd: list[str]) -> int:
 
 
 def run_analyze(console: Console, project_key: str) -> bool:
-    rc = stream_subprocess(
-        console,
-        f"Analyzing {project_key}",
-        [sys.executable, str(ROOT / "analyze.py"), "--project", project_key],
-    )
-    return rc == 0
+    """Single-project analyst — drives the Manhattan progress animation off
+    analyze.py's stdout. Used only when one project is selected in onboard;
+    parallel multi-project mode keeps line-based output."""
+    import progress_anim
+    return progress_anim.run_analyst_with_animation(console, project_key)
 
 
 def run_curate(console: Console, project_key: str) -> bool:

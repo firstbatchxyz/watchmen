@@ -928,6 +928,47 @@ def test_corpus_migrates_legacy_db_without_file_mtime():
             corpus.DB_PATH = orig_db
 
 
+# ─── Analyst progress animation ─────────────────────────────────────────────
+
+
+def test_progress_anim_parses_analyst_stdout():
+    """The Manhattan animation drives off analyze.py's stdout lines. If a
+    teammate refactors analyze.py and changes the wording, the animation
+    silently stays at 0%. Regression guard: feed the regexes the exact line
+    shapes analyze.py produces today, assert they match."""
+    import progress_anim
+
+    # Total-day announcement.
+    m = progress_anim._TOTAL_RE.search("Running on 24 days, model=deepseek/deepseek-v4-flash")
+    assert m and m.group(1) == "24"
+
+    # Per-day completion lines (both flavors).
+    assert progress_anim._DONE_RE.search("  [2026-05-08] 13 prompts... done in 97.4s (7505 chars)")
+    assert progress_anim._DONE_RE.search("  [2026-05-09] cached (12 prompts)")
+
+    # Lines that should NOT match (no day prefix or wrong shape).
+    assert not progress_anim._DONE_RE.search("Running on 24 days")
+    assert not progress_anim._DONE_RE.search("  [2026-05-08] 13 prompts... ")  # mid-line, no "done in" yet
+
+
+def test_progress_anim_render_produces_panel():
+    """render() must produce a Rich Panel at any (done, total, frame) without
+    raising — including the bootstrap (done=0, total=0) case where the
+    progress fraction would otherwise divide by zero."""
+    from rich.panel import Panel
+
+    import progress_anim
+    # The bootstrap case BEFORE the first "Running on N days" line.
+    p = progress_anim.render(0, 0, 0, "kai-frontend")
+    assert isinstance(p, Panel)
+    # Mid-run.
+    p = progress_anim.render(7, 30, 42, "tally-weijl")
+    assert isinstance(p, Panel)
+    # Completed.
+    p = progress_anim.render(30, 30, 1000, "kai-bench")
+    assert isinstance(p, Panel)
+
+
 # ─── Onboard parallelism ────────────────────────────────────────────────────
 
 
@@ -1106,6 +1147,10 @@ def main() -> int:
     print()
     print("Onboard parallelism:")
     check("onboard runs multiple projects concurrently",          test_onboard_runs_projects_in_parallel)
+    print()
+    print("Analyst progress animation:")
+    check("progress_anim parses analyst stdout shapes",           test_progress_anim_parses_analyst_stdout)
+    check("progress_anim render produces a Panel at any state",   test_progress_anim_render_produces_panel)
     print()
     print("Codebase hygiene:")
     check("no hardcoded user-specific paths",       test_no_hardcoded_user_paths)

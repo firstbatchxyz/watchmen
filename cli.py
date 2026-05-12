@@ -169,13 +169,16 @@ def cmd_analyze(args) -> int:
             print(_green(f"{args.project}: already up to date (last analyst day: {from_day})"))
             return 0
 
-    cmd = [sys.executable, str(ROOT / "analyze.py"), "-p", args.project, "--model", args.model]
-    if from_day:
-        cmd.extend(["--from-day", from_day])
-
     run_id = state.start_run(args.project, "analyst", notes=f"from_day={from_day}")
-    print(_dim(f"Running: {' '.join(cmd)}"))
-    r = subprocess.run(cmd, cwd=str(ROOT))
+    # Drive the Manhattan progress animation from analyze.py's stdout.
+    import progress_anim
+    from rich.console import Console
+    ok = progress_anim.run_analyst_with_animation(
+        Console(), args.project, model=args.model, from_day=from_day,
+    )
+    class _R:
+        returncode = 0 if ok else 1
+    r = _R()
     if r.returncode == 0:
         # Update last_analyst_day from the latest day in analyses/
         analyses_dir = ROOT / "analyses" / args.project
