@@ -1422,23 +1422,26 @@ def test_cmd_curate_passes_flags_from_db_settings_to_subprocess():
     run — the setting becomes ornamental."""
     import argparse as _ap
     from watchmen import cli
+    from watchmen.commands import pipeline as _pipeline
     captured = {}
     def fake_run(cmd, cwd=None):
         captured["cmd"] = cmd
         # Mimic a successful curator: skills dir empty, exit 0
         return type("R", (), {"returncode": 0})()
-    orig_run = cli.subprocess.run
-    orig_get = cli.state.get_project
-    orig_init = cli.state.init_db
-    orig_start = cli.state.start_run
-    orig_finish = cli.state.finish_run
-    orig_update = cli.state.update_project
-    cli.subprocess.run = fake_run
-    cli.state.init_db = lambda: None
-    cli.state.start_run = lambda *a, **k: 1
-    cli.state.finish_run = lambda *a, **k: None
-    cli.state.update_project = lambda *a, **k: None
-    cli.state.get_project = lambda key: {
+    # cmd_curate moved to commands.pipeline — its `subprocess` + `state`
+    # bindings live there now, so that's where the test stubs go.
+    orig_run = _pipeline.subprocess.run
+    orig_get = _pipeline.state.get_project
+    orig_init = _pipeline.state.init_db
+    orig_start = _pipeline.state.start_run
+    orig_finish = _pipeline.state.finish_run
+    orig_update = _pipeline.state.update_project
+    _pipeline.subprocess.run = fake_run
+    _pipeline.state.init_db = lambda: None
+    _pipeline.state.start_run = lambda *a, **k: 1
+    _pipeline.state.finish_run = lambda *a, **k: None
+    _pipeline.state.update_project = lambda *a, **k: None
+    _pipeline.state.get_project = lambda key: {
         "source_repo": "/tmp/repo",
         "approval_required": 1,
         "skip_overlapping_skills": 1,
@@ -1449,12 +1452,12 @@ def test_cmd_curate_passes_flags_from_db_settings_to_subprocess():
             skip_overlap=False, approval_required=False,
         ))
     finally:
-        cli.subprocess.run = orig_run
-        cli.state.get_project = orig_get
-        cli.state.init_db = orig_init
-        cli.state.start_run = orig_start
-        cli.state.finish_run = orig_finish
-        cli.state.update_project = orig_update
+        _pipeline.subprocess.run = orig_run
+        _pipeline.state.get_project = orig_get
+        _pipeline.state.init_db = orig_init
+        _pipeline.state.start_run = orig_start
+        _pipeline.state.finish_run = orig_finish
+        _pipeline.state.update_project = orig_update
     cmd = captured["cmd"]
     assert "--skip-overlap" in cmd, f"setting didn't propagate: {cmd}"
     assert "--approval-required" in cmd, f"setting didn't propagate: {cmd}"
@@ -1946,15 +1949,18 @@ def test_cli_learn_short_circuits_when_no_new_prompts():
     should run the curator anyway — that's the documented escape hatch."""
     import io
     from watchmen import cli
+    from watchmen.commands import pipeline as _pipeline
     calls = {"analyze": 0, "curate": 0}
-    orig_analyze = cli.cmd_analyze
-    orig_curate = cli.cmd_curate
-    orig_get = cli.state.get_project
-    orig_progress = cli.state.get_project_progress
-    cli.cmd_analyze = lambda a: (calls.__setitem__("analyze", calls["analyze"] + 1), 0)[1]
-    cli.cmd_curate = lambda a: (calls.__setitem__("curate", calls["curate"] + 1), 0)[1]
-    cli.state.get_project = lambda key: {"project_key": key} if key == "p" else None
-    cli.state.get_project_progress = lambda key: {
+    orig_analyze = _pipeline.cmd_analyze
+    orig_curate = _pipeline.cmd_curate
+    orig_get = _pipeline.state.get_project
+    orig_progress = _pipeline.state.get_project_progress
+    # cmd_learn lives in commands.pipeline and resolves cmd_analyze /
+    # cmd_curate from its own module — patch them there, not on cli.
+    _pipeline.cmd_analyze = lambda a: (calls.__setitem__("analyze", calls["analyze"] + 1), 0)[1]
+    _pipeline.cmd_curate = lambda a: (calls.__setitem__("curate", calls["curate"] + 1), 0)[1]
+    _pipeline.state.get_project = lambda key: {"project_key": key} if key == "p" else None
+    _pipeline.state.get_project_progress = lambda key: {
         "last_analyst_day": "2026-05-12",
         "new_prompts_since_last_analysis": 0,
     }
@@ -1979,7 +1985,7 @@ def test_cli_learn_short_circuits_when_no_new_prompts():
 
         # New prompts → both run; learn returns curator's rc.
         buf.truncate(0); buf.seek(0)
-        cli.state.get_project_progress = lambda key: {
+        _pipeline.state.get_project_progress = lambda key: {
             "last_analyst_day": "2026-05-12",
             "new_prompts_since_last_analysis": 42,
         }
@@ -1995,8 +2001,10 @@ def test_cli_learn_short_circuits_when_no_new_prompts():
         assert rc == 1 and calls == {"analyze": 0, "curate": 0}
     finally:
         cli.sys.stdout = orig_stdout
-        cli.cmd_analyze = orig_analyze
-        cli.cmd_curate = orig_curate
+        _pipeline.cmd_analyze = orig_analyze
+        _pipeline.cmd_curate = orig_curate
+        _pipeline.state.get_project = orig_get
+        _pipeline.state.get_project_progress = orig_progress
         cli.state.get_project = orig_get
         cli.state.get_project_progress = orig_progress
 
@@ -2115,21 +2123,21 @@ def test_sparkline_and_bar_edge_cases():
     series, all-zero series, zero max for bars). A regression here would mean
     the metrics command crashes for projects with no spend yet — exactly the
     state new users land in for their first hour."""
-    from watchmen import cli
+    from watchmen.ui import sparkline as _sparkline, bar as _bar
     # Sparkline: empty → empty
-    assert cli._sparkline([]) == ""
+    assert _sparkline([]) == ""
     # Sparkline: all zeros → all-low block (length preserved)
-    s = cli._sparkline([0, 0, 0, 0])
+    s = _sparkline([0, 0, 0, 0])
     assert len(s) == 4 and all(c == "▁" for c in s)
     # Sparkline: ascending series renders ascending blocks
-    s = cli._sparkline([1, 2, 4, 8, 16])
+    s = _sparkline([1, 2, 4, 8, 16])
     assert s[0] < s[-1]  # blocks are sortable: ▁ < ▂ < … < █
     # Bar: zero max → empty (no division explosion)
-    assert cli._bar(5, 0, width=10) == ""
+    assert _bar(5, 0, width=10) == ""
     # Bar: full value vs max → full-width string of full blocks
-    assert cli._bar(10, 10, width=10) == "█" * 10
+    assert _bar(10, 10, width=10) == "█" * 10
     # Bar: half-block precision for half-position values
-    half = cli._bar(0.55, 1.0, width=10)
+    half = _bar(0.55, 1.0, width=10)
     assert "▌" in half, f"half-block missing: {half!r}"
 
 
@@ -2295,10 +2303,9 @@ def test_cli_insights_aggregates_curated_and_uncurated_repos():
         orig_prog = cli.state.get_project_progress
         orig_init = cli.state.init_db
         # cmd_insights moved to commands.insights during Phase 3 — the alias
-        # `_adapter_breakdown` lives there now. cli still re-uses its own
-        # alias for cmd_metrics/cmd_doctor, so we patch BOTH binding sites
-        # to keep the test isolated whether or not future code paths drift.
-        orig_breakdown_cli = cli._adapter_breakdown
+        # `_adapter_breakdown` lives there now. cmd_metrics/cmd_status moved
+        # to commands.pipeline in a follow-up split, so the cli-level alias
+        # is gone; patching just the insights binding is enough for this test.
         orig_breakdown_insights = _insights._adapter_breakdown
         orig_daily = _m.daily_metrics
 
@@ -2319,7 +2326,6 @@ def test_cli_insights_aggregates_curated_and_uncurated_repos():
             {"claude_code": 3, "codex": 1, "pi": 0} if key == "p2"
             else {"claude_code": 7, "codex": 0, "pi": 0}
         )
-        cli._adapter_breakdown = fake_breakdown
         _insights._adapter_breakdown = fake_breakdown
         _m.daily_metrics = lambda key, days=30: [
             {"sessions": 2}, {"sessions": 1}, {"sessions": 0},
@@ -2338,7 +2344,6 @@ def test_cli_insights_aggregates_curated_and_uncurated_repos():
             cli.state.recent_runs = orig_runs
             cli.state.get_project_progress = orig_prog
             cli.state.init_db = orig_init
-            cli._adapter_breakdown = orig_breakdown_cli
             _insights._adapter_breakdown = orig_breakdown_insights
             _m.daily_metrics = orig_daily
 
