@@ -539,6 +539,23 @@
       font-variant-numeric: tabular-nums;
     }
 
+    /* Trend caption shown under area charts ("↗ +12% · 7d trend").
+       Color tracks the direction-vs-good polarity so the visual matches
+       the sparkline color shift on the chart itself. */
+    .wm-trend {
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      margin-top: 4px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .wm-trend--good { color: hsl(142, 71%, 35%); }
+    .wm-trend--bad  { color: hsl(0, 70%, 45%); }
+    .wm-trend--flat { color: hsl(var(--muted-foreground)); }
+    .wm-trend__arrow { font-size: 13px; line-height: 1; }
+    .wm-trend__note  { color: hsl(var(--muted-foreground)); margin-left: 2px; }
+
     .wm-chart { width: 100%; min-height: 60px; }
     .wm-chart--sm  { height: 72px; }
     .wm-chart--md  { height: 200px; }
@@ -622,9 +639,44 @@
           el.innerHTML = '<div class="wm-chart__empty">No data in this window.</div>';
           return;
         }
-        const color = el.dataset.color || 'hsl(217, 91%, 60%)';
+        let baseColor = el.dataset.color || 'hsl(217, 91%, 60%)';
         const label = el.dataset.label || 'value';
         const valueFmt = el.dataset.valueFmt || 'int';  // 'int' | 'usd' | 'float'
+
+        // Trend-direction color shift: green if the metric is trending in
+        // its "good" direction, red if not. Falls back to base color when
+        // no trend signal (insufficient data) or up_is_good is null
+        // (neutral metric like input_tokens). Server passes `up_is_good`
+        // because Python knows the metric semantics; JS just applies it.
+        let trend = null;
+        try { trend = JSON.parse(el.dataset.trend || 'null'); } catch { trend = null; }
+        let color = baseColor;
+        if (trend && trend.up_is_good != null && trend.direction !== 'flat') {
+          const positive = (trend.direction === 'up') === trend.up_is_good;
+          color = positive ? 'hsl(142, 71%, 45%)' : 'hsl(0, 84%, 55%)';
+        }
+
+        // Curator-run pins — markPoint annotations on the timeline showing
+        // dates where watchmen produced new skills or refreshed CLAUDE.md.
+        // Helps the user connect activity spikes to "ah, watchmen re-curated
+        // that day". Server provides `pins`; the helper turns each into a
+        // coord-anchored marker.
+        let pins = [];
+        try { pins = JSON.parse(el.dataset.pins || '[]'); } catch { pins = []; }
+        const xDates = points.map(p => p.date);
+        const yByDate = Object.fromEntries(points.map(p => [p.date, p.value]));
+        const markPointData = pins
+          .filter(p => yByDate[p.date] !== undefined)  // pin must align with a data point
+          .map(p => ({
+            coord: [p.date, yByDate[p.date]],
+            name:  p.label,
+            value: p.detail || p.label,
+            symbol: 'pin',
+            symbolSize: 22,
+            symbolOffset: [0, -2],
+            itemStyle: { color: 'hsl(38, 92%, 50%)', borderColor: '#fff', borderWidth: 1.5 },
+            label: { show: false },
+          }));
 
         const chart = echarts.init(el, null, { renderer: 'svg' });
         el.__wmChart = chart;
@@ -690,6 +742,20 @@
               },
             },
             emphasis: { focus: 'series' },
+            // Pins (curator runs) — rendered as orange amber drops anchored
+            // to the data point on that date. Tooltip composer reads from
+            // the markPoint params (name = label, value = detail).
+            markPoint: markPointData.length ? {
+              data: markPointData,
+              tooltip: {
+                formatter: (p) => {
+                  const d = fmtDate(p.data.coord[0]).long;
+                  return `<div style="font-size:11px;color:${AXIS_LABEL};">${d}</div>
+                          <div style="font-size:13px;font-weight:600;color:${TEXT_FG};">${p.data.name}</div>
+                          ${p.data.value ? `<div style="font-size:11px;color:${AXIS_LABEL};margin-top:2px;">${p.data.value}</div>` : ''}`;
+                },
+              },
+            } : undefined,
           }],
         });
 

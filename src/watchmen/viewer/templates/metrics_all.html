@@ -127,6 +127,18 @@
     <div class="wm-profile__visual">
       <div class="wm-profile__visual-label">Activity ({{ card_days }}d)</div>
       <div class="space-y-3">
+        {% macro trend_caption(t) %}
+          {% if t %}
+            {% set good = (t.up_is_good is not none) and (t.up_is_good == (t.direction == 'up')) %}
+            {% set cls = 'wm-trend--good' if good and t.direction != 'flat' else ('wm-trend--bad' if (t.up_is_good is not none) and (not good) and t.direction != 'flat' else 'wm-trend--flat') %}
+            {% set arrow = '↗' if t.direction == 'up' else ('↘' if t.direction == 'down' else '→') %}
+            <span class="wm-trend {{ cls }}">
+              <span class="wm-trend__arrow">{{ arrow }}</span>
+              {% if t.pct is not none %}{{ t.direction == 'up' and '+' or '−' }}{{ t.pct }}%{% else %}new{% endif %}
+              <span class="wm-trend__note">· {{ t.window }}d trend</span>
+            </span>
+          {% endif %}
+        {% endmacro %}
         <div>
           <div class="flex items-baseline justify-between text-xs">
             <span class="text-gray-500">Sessions / day</span>
@@ -136,7 +148,10 @@
                data-color="hsl(217, 91%, 60%)"
                data-label="Sessions"
                data-value-fmt="int"
+               data-trend='{{ card_activity_trends.sessions|tojson }}'
+               data-pins='{{ card_curator_pins|tojson }}'
                data-points='{{ card_activity_data.sessions|tojson }}'></div>
+          {{ trend_caption(card_activity_trends.sessions) }}
         </div>
         <div>
           <div class="flex items-baseline justify-between text-xs">
@@ -147,7 +162,9 @@
                data-color="hsl(38, 92%, 50%)"
                data-label="Cost"
                data-value-fmt="usd"
+               data-trend='{{ card_activity_trends.cost|tojson }}'
                data-points='{{ card_activity_data.cost|tojson }}'></div>
+          {{ trend_caption(card_activity_trends.cost) }}
         </div>
         <div>
           <div class="flex items-baseline justify-between text-xs">
@@ -158,7 +175,9 @@
                data-color="hsl(0, 84%, 60%)"
                data-label="Errors"
                data-value-fmt="int"
+               data-trend='{{ card_activity_trends.tool_errors|tojson }}'
                data-points='{{ card_activity_data.tool_errors|tojson }}'></div>
+          {{ trend_caption(card_activity_trends.tool_errors) }}
         </div>
       </div>
     </div>

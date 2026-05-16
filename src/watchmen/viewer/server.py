@@ -46,6 +46,84 @@ def render_md(text: str) -> str:
     )
 
 
+def _trend_delta(points: list[dict], window: int = 7, *, up_is_good: bool | None = None) -> dict | None:
+    """Compute last-N-day total vs prior-N-day total for a daily-value series.
+    `up_is_good` flips the polarity so the chart helper can pick the right
+    color (green/red) for the caption + line stroke — sessions trending up
+    is good, tool errors trending up is bad.
+
+    Returns None when there's not enough data (< 2*window days) or the prior
+    window summed to 0 (no baseline to compare against). The chart helper
+    treats None as "no trend signal — keep base color, hide caption."
+    """
+    if not points or len(points) < window * 2:
+        return None
+    values = [p.get("value", 0) or 0 for p in points]
+    recent = sum(values[-window:])
+    prior  = sum(values[-2 * window:-window])
+    if prior == 0:
+        # Special case: 0 → N% is mathematically undefined but visually it's a
+        # strong "up trend." Show it without a misleading percentage.
+        if recent == 0:
+            return None
+        return {"direction": "up", "pct": None, "window": window, "up_is_good": up_is_good}
+    delta = (recent - prior) / prior * 100.0
+    direction = "up" if delta > 0 else ("down" if delta < 0 else "flat")
+    return {
+        "direction": direction,
+        "pct": round(abs(delta), 1),
+        "window": window,
+        "up_is_good": up_is_good,
+    }
+
+
+def _curator_pins(days: int = 90) -> list[dict]:
+    """Per-day curator-run summaries to mark on activity timelines.
+
+    Each pin is one date that had at least one successful curator run.
+    Pulled from the runs table — we only mark `curator*` kinds (analyst
+    runs alone don't change md/skill output, just refresh the corpus).
+    Grouped by date so a day with multiple curator runs renders one pin.
+    """
+    from datetime import datetime, timedelta
+    from watchmen import state as _state
+    _state.init_db()
+    cutoff = (datetime.utcnow() - timedelta(days=days)).date().isoformat()
+    runs = _state.recent_runs(limit=500)
+    by_date: dict[str, list[dict]] = {}
+    for r in runs:
+        kind = (r.get("kind") or "").lower()
+        if "curator" not in kind:
+            continue
+        if r.get("status") != "ok":
+            continue
+        ts = r.get("ended_at") or r.get("started_at") or ""
+        if not ts:
+            continue
+        date = ts[:10]  # 'YYYY-MM-DD' prefix of the ISO timestamp
+        if date < cutoff:
+            continue
+        by_date.setdefault(date, []).append({
+            "project": r.get("project_key") or "",
+            "kind":    r.get("kind") or "",
+            "notes":   r.get("notes") or "",
+        })
+    pins = []
+    for date in sorted(by_date.keys()):
+        events = by_date[date]
+        projects = sorted({e["project"] for e in events if e["project"]})
+        pin_label = f"{len(events)} curator run" + ("s" if len(events) != 1 else "")
+        detail_parts = projects[:3]
+        if len(projects) > 3:
+            detail_parts.append(f"+{len(projects) - 3} more")
+        pins.append({
+            "date":   date,
+            "label":  pin_label,
+            "detail": " · ".join(detail_parts) if detail_parts else "",
+        })
+    return pins
+
+
 def _db():
     if not STATE_DB.exists():
         return None
@@ -558,6 +636,20 @@ def metrics_all(request: Request, tracked: int = 0):
         "cost":        [{"date": r["date"], "value": r["cost_usd"]}    for r in activity_series],
         "tool_errors": [{"date": r["date"], "value": r["tool_errors"]} for r in activity_series],
     }
+    # Trend deltas — last 7d vs prior 7d per metric. Drives the caption
+    # text under each chart and the sparkline color (up-is-good metrics
+    # get a green-on-up / red-on-down shift; up-is-bad metrics like cost
+    # and errors flip the polarity so the visual still matches intuition).
+    card_activity_trends = {
+        "sessions":    _trend_delta(card_activity_data["sessions"],    window=7, up_is_good=True),
+        "cost":        _trend_delta(card_activity_data["cost"],        window=7, up_is_good=False),
+        "tool_errors": _trend_delta(card_activity_data["tool_errors"], window=7, up_is_good=False),
+    }
+    # Curator pins — dates where the daemon ran the curator and produced
+    # output (CLAUDE.md regen or new skills). Rendered as markPoint
+    # annotations on the activity charts so the user sees "spike on
+    # May 14 = day watchmen re-curated kai-agent-new".
+    card_curator_pins = _curator_pins(days=card_days)
 
     # Cross-agent comparison: per-adapter facts (always available, pure SQL)
     # + LLM-synthesized narrative (cached in ~/.watchmen/insights/, written
@@ -601,6 +693,8 @@ def metrics_all(request: Request, tracked: int = 0):
         "card_radar_data": card_radar_data,
         "card_axis_legend": card_axis_legend,
         "card_activity_data": card_activity_data,
+        "card_activity_trends": card_activity_trends,
+        "card_curator_pins": card_curator_pins,
         "cmp_facts": cmp_facts,
         "cmp_narrative_html": cmp_narrative_html,
         "cmp_narrative_meta": cmp_narrative_meta,
