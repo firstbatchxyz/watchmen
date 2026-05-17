@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}{{ run.action }} {{ run.project_key }} — watchmen{% endblock %}
+
+{# Meta-refresh while still running. Cheap, no JS poll loop needed —     #}
+{# stops as soon as the page renders with status == "done".              #}
+{% block head_extra %}
+  {% if run.status == "running" %}
+  <meta http-equiv="refresh" content="2">
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+<div class="mb-4">
+  <div class="text-xs text-gray-500 mb-1">
+    <a href="/" class="hover:text-gray-700">dashboard</a> /
+    {% if run.project_key %}
+    <a href="/p/{{ run.project_key }}" class="hover:text-gray-700">{{ run.project_key }}</a> /
+    {% endif %}
+  </div>
+  <div class="flex items-center gap-3 flex-wrap">
+    <h1 class="text-2xl font-semibold">
+      <code class="text-base bg-gray-100 px-2 py-0.5 rounded">{{ run.action }}</code>
+      <span class="ml-1">{{ run.project_key }}</span>
+    </h1>
+    {% if run.status == "running" %}
+      <span class="wm-pill wm-pill-running"><span class="wm-actions__run-spinner"></span> running</span>
+    {% else %}
+      <span class="wm-pill wm-pill-ok">✓ done</span>
+    {% endif %}
+    <span class="text-xs text-gray-500">
+      pid {{ run.pid }} · {{ run.duration_s }}s · started {{ run.started_at }}
+    </span>
+  </div>
+</div>
+
+<div class="text-xs text-gray-500 mb-3">
+  log: <code>{{ run.log_path }}</code> · {{ "%.1f"|format(run.log_size/1024) }} KB
+  {% if run.status == "running" %}· auto-refreshing every 2s{% endif %}
+</div>
+
+<pre class="wm-action-run-log">{{ run.log_text }}</pre>
+{% endblock %}

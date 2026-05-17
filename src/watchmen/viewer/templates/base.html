@@ -38,6 +38,7 @@
        (smooth area fills, dashed grid, hover-vertical-line tooltips). Loaded
        once for every page; helper invoked per-chart in template via data-attrs. -->
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js" defer></script>
+  {% block head_extra %}{% endblock %}
 
   <style>
     /* ── Design tokens ────────────────────────────────────────────────
@@ -575,6 +576,168 @@
       color: hsl(var(--muted-foreground));
       font-size: 12px;
       font-style: italic;
+    }
+
+    /* ── Next-best-action banner ──────────────────────────────────────
+       Always-on, top-of-page suggestion strip. Quiet when there's nothing
+       to do (the template skips render). Each item is one-line on wide
+       screens, stacks gracefully on narrow. */
+    .wm-actions {
+      background: hsl(var(--card));
+      border: 1px solid hsl(var(--border));
+      border-radius: 12px;
+      padding: 14px 18px;
+      box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+    }
+    .wm-actions__header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .wm-actions__title {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px; font-weight: 600;
+      letter-spacing: 0.06em; text-transform: uppercase;
+      color: hsl(var(--foreground));
+    }
+    .wm-actions__dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: hsl(var(--accent));
+      box-shadow: 0 0 0 3px hsl(var(--accent) / 0.18);
+    }
+    .wm-actions__sub {
+      font-size: 11px; color: hsl(var(--muted-foreground));
+    }
+    .wm-actions__running {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      margin-bottom: 10px;
+    }
+    .wm-actions__run-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 11px;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: hsl(45 90% 92%);
+      color: hsl(35 70% 32%);
+      text-decoration: none;
+    }
+    .wm-actions__run-pill:hover { background: hsl(45 90% 88%); }
+    .wm-actions__run-dur {
+      font-variant-numeric: tabular-nums;
+      opacity: 0.7;
+      margin-left: 4px;
+    }
+    .wm-actions__run-spinner {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: hsl(35 90% 50%);
+      animation: wm-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes wm-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%      { opacity: 0.4; transform: scale(0.85); }
+    }
+    .wm-actions__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+    .wm-actions__item {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border: 1px solid hsl(var(--border));
+      border-radius: 10px;
+      background: hsl(var(--muted) / 0.25);
+    }
+    .wm-actions__item--high   { border-left: 3px solid hsl(0 75% 50%); }
+    .wm-actions__item--medium { border-left: 3px solid hsl(35 90% 50%); }
+    .wm-actions__item--low    { border-left: 3px solid hsl(217 91% 60%); }
+    .wm-actions__item-left {
+      display: flex; align-items: flex-start; gap: 10px;
+      min-width: 0; flex: 1;
+    }
+    .wm-actions__sev {
+      font-size: 9px; font-weight: 700;
+      letter-spacing: 0.08em; text-transform: uppercase;
+      padding: 3px 7px;
+      border-radius: 4px;
+      margin-top: 2px;
+      flex: 0 0 auto;
+    }
+    .wm-actions__sev--high   { background: hsl(0 75% 95%);  color: hsl(0 75% 38%); }
+    .wm-actions__sev--medium { background: hsl(35 90% 92%); color: hsl(35 70% 32%); }
+    .wm-actions__sev--low    { background: hsl(var(--accent-soft)); color: hsl(var(--accent-strong)); }
+    .wm-actions__item-title {
+      font-size: 13px; font-weight: 600;
+      color: hsl(var(--foreground));
+      line-height: 1.3;
+    }
+    .wm-actions__item-reason {
+      font-size: 12px;
+      color: hsl(var(--muted-foreground));
+      line-height: 1.4;
+      margin-top: 2px;
+    }
+    .wm-actions__item-right {
+      display: flex; align-items: center; gap: 8px;
+      flex-shrink: 0;
+    }
+    .wm-actions__cmd {
+      display: inline-block;
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 11px;
+      padding: 4px 8px;
+      background: hsl(var(--background));
+      border: 1px solid hsl(var(--border));
+      border-radius: 6px;
+      color: hsl(var(--foreground));
+      cursor: pointer;
+      user-select: all;
+      transition: border-color 120ms ease, background 120ms ease;
+    }
+    .wm-actions__cmd:hover {
+      border-color: hsl(var(--accent));
+      background: hsl(var(--accent-soft));
+    }
+    .wm-actions__cmd--copied {
+      color: hsl(142 60% 30%);
+      border-color: hsl(142 60% 60%);
+      background: hsl(142 60% 94%);
+    }
+    .wm-actions__run-btn {
+      display: inline-block;
+      font-size: 12px; font-weight: 500;
+      padding: 5px 12px;
+      border-radius: 6px;
+      background: hsl(var(--accent));
+      color: white;
+      border: 1px solid hsl(var(--accent-strong));
+      cursor: pointer;
+      text-decoration: none;
+      transition: background 120ms ease;
+    }
+    .wm-actions__run-btn:hover { background: hsl(var(--accent-strong)); }
+    .wm-actions__run-btn--link {
+      background: white;
+      color: hsl(var(--foreground));
+      border-color: hsl(var(--border));
+    }
+    .wm-actions__run-btn--link:hover { background: hsl(var(--muted)); }
+    @media (max-width: 720px) {
+      .wm-actions__item { flex-direction: column; align-items: stretch; }
+      .wm-actions__item-right { justify-content: flex-start; flex-wrap: wrap; }
+    }
+
+    /* ── Action run log viewer ────────────────────────────────────── */
+    .wm-action-run-log {
+      background: hsl(220 9% 12%);
+      color: hsl(220 9% 92%);
+      border-radius: 10px;
+      padding: 16px 18px;
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 70vh;
+      overflow-y: auto;
     }
   </style>
 </head>

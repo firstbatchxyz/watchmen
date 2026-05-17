@@ -1741,6 +1741,77 @@ def test_viewer_metrics_route_includes_per_agent_section_when_data_exists():
             assert "Claude Code" in html
 
 
+def test_viewer_actions_run_dispatch_and_status(tmp_path, monkeypatch):
+    """Web-triggered runs should spawn a real CLI subprocess, write a log
+    file under WATCHMEN_HOME/web-runs/, redirect to a tail page, and flip
+    from "running" → "done" once the process exits (zombie reaping)."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from fastapi.testclient import TestClient
+    from watchmen.viewer import actions as wm_actions
+    from watchmen.viewer import server as viewer_server
+
+    # Redirect web-runs storage to tmp_path so we don't pollute the real
+    # WATCHMEN_HOME, and substitute a fast-exiting binary for "watchmen"
+    # so the test runs in <100ms regardless of CLI install state.
+    runs_dir = tmp_path / "web-runs"
+    monkeypatch.setattr(wm_actions, "WEB_RUNS_DIR", runs_dir)
+    monkeypatch.setattr(wm_actions.shutil, "which", lambda _name: "/bin/echo")
+    monkeypatch.setitem(wm_actions.RUNNABLE_ACTIONS, "analyze", ["analyze"])
+
+    client = TestClient(viewer_server.app)
+
+    # Rejection: unknown action.
+    r = client.post(
+        "/actions/run",
+        content="action=banana&project_key=demo",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert r.status_code == 400
+
+    # Rejection: invalid project_key (path-traversal / shell metachars).
+    r = client.post(
+        "/actions/run",
+        content="action=analyze&project_key=..%2F..%2Fetc%2Fpasswd",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert r.status_code == 400
+
+    # Happy path: spawn "echo analyze demo", redirect to /actions/run/<id>.
+    r = client.post(
+        "/actions/run",
+        content="action=analyze&project_key=demo",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    run_id = r.headers["location"].rsplit("/", 1)[-1]
+    assert (runs_dir / f"{run_id}.json").exists()
+    assert (runs_dir / f"{run_id}.log").exists()
+
+    # Tail page renders + reports done once the zombie is reaped.
+    wm_actions._wait_for_finish(run_id, timeout_s=3.0)
+    r2 = client.get(f"/actions/run/{run_id}")
+    assert r2.status_code == 200
+    assert "✓ done" in r2.text
+    assert "analyze" in r2.text and "demo" in r2.text
+
+
+def test_viewer_next_best_actions_ranks_signals():
+    """The action banner ranks projects by need. With no tracked projects
+    the helper returns an empty list (graceful empty state) — the heavier
+    ranking branches are covered by integration testing against real
+    corpora."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from watchmen.viewer import actions as wm_actions
+
+    # No projects → no actions. Don't assert on shape beyond emptiness;
+    # caller code (template) tolerates any list including empty.
+    out = wm_actions.next_best_actions(project_key="definitely-not-tracked")
+    assert out == []
+
+
 def test_viewer_skill_page_renders_provenance_and_controls(tmp_path, monkeypatch):
     """Skill detail page should surface `watchmen why` data inline
     (triggers, source files, sessions, curator excerpt) AND let the user

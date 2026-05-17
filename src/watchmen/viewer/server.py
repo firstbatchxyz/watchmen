@@ -19,6 +19,7 @@ from watchmen.util import (
     read_skill_list,
     write_skill_list,
 )
+from watchmen.viewer import actions as wm_actions
 
 ROOT = Path(__file__).parent.parent  # src/watchmen/
 ANALYSES = ANALYSES_DIR
@@ -314,6 +315,8 @@ def dashboard(request: Request):
         "runs": runs,
         "changelog_version": changelog_version,
         "changelog_body_html": changelog_body_html,
+        "next_actions": wm_actions.next_best_actions(limit=5),
+        "active_web_runs": [r for r in wm_actions.list_runs(limit=5) if r["alive"]],
     })
 
 
@@ -331,6 +334,11 @@ def project_page(request: Request, project_key: str):
         "claude_md": claude_md_html,
         "skills": skills,
         "thesis_days": days,
+        "next_actions": wm_actions.next_best_actions(project_key=project_key, limit=4),
+        "active_web_runs": [
+            r for r in wm_actions.list_runs(limit=10)
+            if r["alive"] and r.get("project_key") == project_key
+        ],
     })
 
 
@@ -416,6 +424,44 @@ def skill_restore(project_key: str, skill_slug: str):
     return RedirectResponse(
         url=f"/p/{project_key}/skills/{skill_slug}", status_code=303
     )
+
+
+# ─── Web-triggered runs ──────────────────────────────────────────────────────
+# Lets users press "Analyze now" / "Curate now" buttons in the action banner.
+# Spawns a detached subprocess; the page redirects to /actions/run/<id> which
+# tails the log file until the process exits. State files live under
+# ~/.watchmen/web-runs/ alongside the daemon's existing storage.
+
+
+@app.post("/actions/run")
+async def actions_run(request: Request):
+    """Spawn a CLI subprocess. Parses the urlencoded body manually to avoid
+    pulling in python-multipart (FastAPI's Form(...) and request.form() both
+    require it; we don't otherwise need form upload features)."""
+    from urllib.parse import parse_qs
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    fields = parse_qs(raw, keep_blank_values=False)
+    action = (fields.get("action", [""])[0]).strip()
+    project_key = (fields.get("project_key", [""])[0]).strip()
+    if not action or not project_key:
+        raise HTTPException(400, "missing 'action' or 'project_key' form field")
+    try:
+        meta = wm_actions.start_run(action, project_key)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    return RedirectResponse(url=f"/actions/run/{meta['id']}", status_code=303)
+
+
+@app.get("/actions/run/{run_id}", response_class=HTMLResponse)
+def actions_run_view(request: Request, run_id: str):
+    meta = wm_actions.get_run(run_id)
+    if not meta:
+        raise HTTPException(404, f"run {run_id} not found")
+    return TEMPLATES.TemplateResponse(request, "action_run.html", {
+        "run": meta,
+    })
 
 
 @app.get("/p/{project_key}/skills/{skill_slug}/files/{file_rel:path}", response_class=HTMLResponse)

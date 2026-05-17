@@ -1,0 +1,89 @@
+{# Renders the next-best-action banner shared by / and /p/{key}.        #}
+{# Caller must pass `next_actions` (list of dicts from                   #}
+{# watchmen.viewer.actions.next_best_actions) and optionally              #}
+{# `active_web_runs`. Quiet by design when there's nothing to do.        #}
+
+{% if next_actions or active_web_runs %}
+<section class="wm-actions mb-6">
+  <div class="wm-actions__header">
+    <div class="wm-actions__title">
+      <span class="wm-actions__dot"></span>
+      <span>Next moves</span>
+    </div>
+    <span class="wm-actions__sub">
+      {% if next_actions %}{{ next_actions|length }} ranked{% endif %}
+      {% if active_web_runs %} · {{ active_web_runs|length }} running{% endif %}
+    </span>
+  </div>
+
+  {% if active_web_runs %}
+  <div class="wm-actions__running">
+    {% for r in active_web_runs %}
+    <a href="/actions/run/{{ r.id }}" class="wm-actions__run-pill">
+      <span class="wm-actions__run-spinner"></span>
+      <span><code>{{ r.action }}</code> {{ r.project_key }}</span>
+      <span class="wm-actions__run-dur">{{ r.duration_s or 0 }}s</span>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if next_actions %}
+  <ul class="wm-actions__list">
+    {% for a in next_actions %}
+    <li class="wm-actions__item wm-actions__item--{{ a.severity }}">
+      <div class="wm-actions__item-left">
+        <span class="wm-actions__sev wm-actions__sev--{{ a.severity }}">{{ a.severity }}</span>
+        <div class="min-w-0">
+          <div class="wm-actions__item-title">{{ a.title }}</div>
+          <div class="wm-actions__item-reason">{{ a.reason }}</div>
+        </div>
+      </div>
+      <div class="wm-actions__item-right">
+        <code class="wm-actions__cmd"
+              data-wm-copy="{{ a.command }}"
+              title="Click to copy">{{ a.command }}</code>
+        {% if a.run_action %}
+        <form method="post" action="/actions/run" class="inline">
+          <input type="hidden" name="action" value="{{ a.run_action }}">
+          <input type="hidden" name="project_key" value="{{ a.project_key }}">
+          <button type="submit" class="wm-actions__run-btn"
+                  title="Spawn `{{ a.command }}` in the background.">
+            Run now
+          </button>
+        </form>
+        {% elif a.href %}
+        <a href="{{ a.href }}" class="wm-actions__run-btn wm-actions__run-btn--link">Open</a>
+        {% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+<script>
+  // One-click copy on any wm-actions__cmd snippet. Tiny vanilla impl —
+  // navigator.clipboard.writeText, briefly swap the text to "copied" so
+  // the user gets visual confirmation. Falls back to a select-and-copy
+  // path on older browsers without breaking layout.
+  document.querySelectorAll('.wm-actions__cmd').forEach(el => {
+    el.addEventListener('click', async () => {
+      const cmd = el.dataset.wmCopy || el.textContent;
+      try {
+        await navigator.clipboard.writeText(cmd);
+        const orig = el.textContent;
+        el.textContent = '✓ copied';
+        el.classList.add('wm-actions__cmd--copied');
+        setTimeout(() => {
+          el.textContent = orig;
+          el.classList.remove('wm-actions__cmd--copied');
+        }, 1200);
+      } catch (_) {
+        const r = document.createRange(); r.selectNode(el);
+        getSelection().removeAllRanges(); getSelection().addRange(r);
+      }
+    });
+  });
+</script>
+{% endif %}

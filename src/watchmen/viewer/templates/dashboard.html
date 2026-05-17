@@ -2,6 +2,8 @@
 {% block title %}watchmen dashboard{% endblock %}
 {% block content %}
 
+{% include "_action_banner.html" %}
+
 {% if changelog_version and changelog_body_html %}
 <div id="watchmen-changelog-banner"
      data-version="{{ changelog_version }}"
