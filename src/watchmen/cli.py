@@ -98,6 +98,7 @@ from watchmen.commands.pipeline import (
 )
 from watchmen.commands.lifecycle import cmd_down, cmd_up
 from watchmen.commands.subagents import cmd_subagents
+from watchmen.commands.distill import cmd_distill
 from watchmen.util import find_changelog as _find_changelog
 
 
@@ -113,6 +114,12 @@ SOURCE_ROOT = Path(__file__).parent
 # so argparse `default=DEFAULT_MODEL()` evaluates after env/file loads complete.
 def DEFAULT_MODEL() -> str:  # noqa: N802  — capitalized for callsite continuity
     return config.default_model()
+
+
+def DISTILL_DEFAULT_MODEL() -> str:  # noqa: N802  — capitalized for callsite continuity
+    return config.distill_default_model()
+
+
 VIEWER_DEFAULT_HOST = config.VIEWER_DEFAULT_HOST
 VIEWER_DEFAULT_PORT = config.VIEWER_DEFAULT_PORT
 
@@ -1208,6 +1215,7 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("restore",    "remove a slug from the blocklist"),
         ("learn",      "fast cycle: analyze + light curator (~$0.50)"),
         ("review",     "interactive walk: keep/drop/pin per skill"),
+        ("distill",    "semantic skill distill: find overlaps and stage merged drafts"),
     ]),
 ]
 
@@ -1367,6 +1375,28 @@ def main(argv: list[str] | None = None) -> int:
     p_prune.add_argument("--model", default=None,
                          help=f"model override (default: {DEFAULT_MODEL()})")
     p_prune.set_defaults(func=cmd_prune)
+
+    p_distill = sub.add_parser(
+        "distill",
+        help="inspect created skills, find semantic merge candidates, and optionally apply them",
+    )
+    p_distill.add_argument("project")
+    p_distill.add_argument("--threshold", type=float, default=None,
+                           help="minimum merge score (default 0.80 semantic, 0.28 with --local)")
+    p_distill.add_argument("--scope", choices=["metadata", "skill-md", "folder"], default="metadata",
+                           help="text source for similarity: metadata, skill-md, or folder (default metadata)")
+    p_distill.add_argument("--local", action="store_true",
+                           help="skip the LLM judge and show only the local candidate mesh")
+    p_distill.add_argument("--llm", action="store_true", help=argparse.SUPPRESS)
+    p_distill.add_argument("--model", default=None,
+                           help=f"model override for semantic judging (default: {DISTILL_DEFAULT_MODEL()})")
+    p_distill.add_argument("--stage", action="store_true",
+                           help="write distilled merge drafts under _pending/ instead of opening the apply picker")
+    p_distill.add_argument("--animate", action="store_true",
+                           help="render the live Watchmen skill-mesh visualization")
+    p_distill.add_argument("--json", action="store_true",
+                           help="print the distillation plan as JSON")
+    p_distill.set_defaults(func=cmd_distill)
 
     p_reset = sub.add_parser(
         "reset",

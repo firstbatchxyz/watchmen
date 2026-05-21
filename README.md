@@ -336,6 +336,38 @@ watchmen curate kai-frontend --skip-overlap
 watchmen settings set kai-frontend skip_overlapping_skills true
 ```
 
+### Skill distillation
+
+```bash
+watchmen distill my-project
+watchmen distill my-project --animate
+watchmen distill my-project --scope skill-md
+watchmen distill my-project --scope folder
+watchmen distill my-project --local
+watchmen distill my-project --stage
+```
+
+`distill` is the non-destructive reducer pass. It inspects the skills already
+created for a project, runs pairwise LLM comparisons with a structured
+similarity rubric, and writes `bundles/<project>/_distill_plan.json`.
+By default it compares low-noise skill metadata: slug, name, description,
+`when_to_use`/`trigger_phrases`, and `when_not_to_use`. Use
+`--scope skill-md` to also include `SKILL.md` headings and bullets, or
+`--scope folder` to add a conservative digest of extra docs/scripts in the skill
+folder. The rubric scores semantic replaceability, trigger/procedure overlap,
+boundary compatibility, merge risk, and what a merged draft must preserve. Use
+`--threshold` to tune the minimum semantic merge score, `--model` or
+`WATCHMEN_DISTILL_MODEL` to override the high-consistency distill model, or
+`--local` when you only want the offline candidate mesh. In an interactive
+terminal, semantic distill asks whether to open the merge picker after analysis:
+use arrow keys to inspect candidate summaries, Space to select/unselect drafts,
+and Enter to apply the selected merges. Applying a merge promotes the distilled
+skill into `skills/`, archives the superseded originals under
+`bundles/<project>/_distilled_archive/`, and blocklists those source slugs so the
+curator does not immediately recreate them. With `--stage`, approved semantic
+candidates are written to `bundles/<project>/_pending/` instead, so
+`watchmen review` remains the slower approval gate.
+
 ## vs Claude Code's `/insights`
 
 Claude Code shipped `/insights` in v2.1.117 (Apr 2026) — LLM-narrated HTML report from your transcripts. It's good. watchmen is **complementary**:
@@ -397,6 +429,8 @@ watchmen restore <key> <skill>   Allow a blocked slug to be re-proposed
 watchmen learn <key>             Fast cycle: analyze + CLAUDE.md refresh (~$0.50)
 watchmen learn <key> --full      With full curator (Stage 1+2+3)
 watchmen review <key>            Interactive walk: pending then approved
+watchmen distill <key>           Skill mesh + merge plan for context rot
+watchmen distill <key> --stage   Stage merged drafts in _pending/
 
 # Services
 watchmen daemon run              Scheduling loop (foreground)

@@ -6,6 +6,29 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Added — Skill mesh distillation planner
+- New `watchmen distill <project>` inspects the project's created skills,
+  runs pairwise LLM comparisons with a structured similarity rubric, and writes
+  `bundles/<project>/_distill_plan.json` with semantic judgments,
+  differences, merge clusters, and a context-rot score.
+- Semantic distillation uses a stronger default model (`gpt-5.5`, or
+  `openai/gpt-5.5` through OpenRouter) and can be overridden with
+  `WATCHMEN_DISTILL_MODEL` or `--model`.
+- Similarity now defaults to low-noise skill metadata, with
+  `--scope skill-md` and `--scope folder` for broader matching when wanted.
+- `watchmen distill <project> --local` skips the LLM judge and shows only the
+  offline candidate mesh.
+- `watchmen distill <project> --stage` creates merged draft skills under
+  `bundles/<project>/_pending/` so the existing `watchmen review` gate can
+  approve them before any original skills are dropped.
+- After a semantic distill run in a TTY, watchmen can open an arrow-key merge
+  picker with live candidate summaries. Space toggles drafts, Enter promotes
+  selected distilled skills, and superseded originals are archived under
+  `_distilled_archive/` while their slugs are blocklisted.
+- `watchmen distill <project> --animate` renders a Rich terminal mesh view:
+  skills connect, clusters form, and overlapping bundles reduce into fewer
+  staged candidates.
+
 ## [0.6.6] — 2026-05-20
 
 Mission-control gets a fourth KPI card so the subagent signal sits next
