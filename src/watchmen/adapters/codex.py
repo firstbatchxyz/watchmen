@@ -74,6 +74,37 @@ def _is_synthetic_user(text: str) -> bool:
     return any(s.startswith(prefix) for prefix in _SYNTHETIC_PREFIXES)
 
 
+def _parse_session_source(value) -> tuple[int, str | None]:
+    """Map codex 0.133.0+ ``session_meta.source`` to (is_subagent, parent_session_id).
+
+    Serialization shape (from codex SessionSource / SubAgentSource enums):
+
+    - Main session (Cli / VSCode / Exec / Mcp / Custom / unknown):
+      ``"cli"``, ``"vscode"``, ``"exec"``, ``"mcp"``, ``{"custom": "..."}``
+      → ``is_subagent=0``.
+    - User-facing subagent (spawned via ``spawn_agent``):
+      ``{"subagent": {"thread_spawn": {"parent_thread_id": "...", "depth": N,
+      "agent_role": "explore", ...}}}`` → ``is_subagent=1`` with parent id.
+    - Internal subagents (Review / Compact / MemoryConsolidation):
+      ``{"subagent": "review"}`` etc. → ``is_subagent=0``. These are codex's
+      own bookkeeping turns, not user-facing delegation, and should not
+      inflate subagent cost-share metrics.
+    - Pre-0.133.0 rollouts: ``source`` is absent or a plain string we don't
+      recognize → falls through to ``is_subagent=0``.
+
+    Unknown shapes return ``(0, None)`` so an unfamiliar future variant
+    silently degrades to the pre-0.133.0 default instead of raising.
+    """
+    if isinstance(value, dict):
+        subagent = value.get("subagent")
+        if isinstance(subagent, dict):
+            spawn = subagent.get("thread_spawn")
+            if isinstance(spawn, dict):
+                parent = spawn.get("parent_thread_id")
+                return 1, str(parent) if parent else None
+    return 0, None
+
+
 def _text_from_content(content) -> str:
     if not isinstance(content, list):
         return ""
@@ -160,6 +191,12 @@ def scan(entry: dict):
                     session["session_id"] = payload["id"]
                 if payload.get("cwd"):
                     session["project_dir"] = payload["cwd"]
+                # Codex 0.133.0+ exposes session lineage via `source`. For
+                # earlier versions this is a plain string we ignore.
+                if "source" in payload:
+                    is_subagent, parent = _parse_session_source(payload["source"])
+                    session["is_subagent"] = is_subagent
+                    session["parent_session_id"] = parent
                 continue
 
             if etype == "turn_context":

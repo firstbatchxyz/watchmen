@@ -6,6 +6,21 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Fixed — Codex subagent telemetry
+- Before this change the codex adapter always set `is_subagent=0`, so
+  every codex session counted toward the user-facing top-level total
+  even when codex had spawned it as a thread-subagent. The dashboard
+  subagent KPI card and `watchmen subagents` cost-share reported 0% for
+  codex projects regardless of actual subagent activity.
+- Codex 0.133.0 exposes session lineage via `session_meta.source`. The
+  adapter now reads that field: `thread_spawn` subagents get
+  `is_subagent=1` with `parent_session_id` filled from the parent thread,
+  while internal codex bookkeeping subagents (Review, Compact,
+  MemoryConsolidation) stay `is_subagent=0` so they do not inflate
+  user-facing delegation metrics.
+- Pre-0.133.0 rollouts have no lineage data on disk; those sessions
+  still report `is_subagent=0` like before.
+
 ### Added — Skill mesh distillation planner
 - New `watchmen distill <project>` inspects the project's created skills,
   runs pairwise LLM comparisons with a structured similarity rubric, and writes
