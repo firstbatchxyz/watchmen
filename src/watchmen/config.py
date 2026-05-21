@@ -235,21 +235,15 @@ def default_model() -> str:
 
 
 def distill_default_model() -> str:
-    """Higher-quality default for semantic skill distillation.
+    """Model used for semantic skill distillation.
 
-    Distill asks for strict structured judgments across many near-duplicate
-    skills. The cheap global default is useful for reports, but it is too loose
-    for JSON-rubric consistency. Users can override with WATCHMEN_DISTILL_MODEL
-    or `watchmen distill --model ...`.
+    Distill asks for strict structured judgments and tends to do better on a
+    stronger model. We do not hardcode model names here because they go stale;
+    instead we respect the user's globally configured default. Users who want a
+    different model for distill specifically can set WATCHMEN_DISTILL_MODEL or
+    pass `watchmen distill --model ...`.
     """
     explicit = read_env_var("WATCHMEN_DISTILL_MODEL")
     if explicit:
         return explicit
-    provider = active_provider()
-    if provider == "openrouter":
-        return "openai/gpt-5.5"
-    if provider in {"openai", "chatgpt"}:
-        return "gpt-5.5"
-    if provider in {"anthropic", "claude-pro"}:
-        return "claude-opus-4-7"
     return default_model()

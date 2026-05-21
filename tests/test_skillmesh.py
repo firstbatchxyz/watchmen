@@ -260,15 +260,20 @@ def test_skillmesh_llm_rubric_retries_invalid_json_then_falls_back(tmp_path, mon
     assert "parseable" in judgment.rationale
 
 
-def test_distill_default_model_prefers_stronger_rubric_model(monkeypatch):
+def test_distill_default_model_respects_env_override_then_global_default(monkeypatch):
     from watchmen import config
 
-    monkeypatch.setattr(config, "read_env_var", lambda key, default=None: None)
-    monkeypatch.setattr(config, "active_provider", lambda: "openrouter")
-    assert config.distill_default_model() == "openai/gpt-5.5"
+    monkeypatch.setattr(config, "default_model", lambda: "global-default-model")
 
-    monkeypatch.setattr(config, "active_provider", lambda: "chatgpt")
-    assert config.distill_default_model() == "gpt-5.5"
+    monkeypatch.setattr(config, "read_env_var", lambda key, default=None: None)
+    assert config.distill_default_model() == "global-default-model"
+
+    monkeypatch.setattr(
+        config,
+        "read_env_var",
+        lambda key, default=None: "override-model" if key == "WATCHMEN_DISTILL_MODEL" else None,
+    )
+    assert config.distill_default_model() == "override-model"
 
 
 def test_skillmesh_stage_skips_llm_keep_separate(tmp_path, monkeypatch):

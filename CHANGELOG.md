@@ -11,9 +11,9 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
   runs pairwise LLM comparisons with a structured similarity rubric, and writes
   `bundles/<project>/_distill_plan.json` with semantic judgments,
   differences, merge clusters, and a context-rot score.
-- Semantic distillation uses a stronger default model (`gpt-5.5`, or
-  `openai/gpt-5.5` through OpenRouter) and can be overridden with
-  `WATCHMEN_DISTILL_MODEL` or `--model`.
+- Semantic distillation uses the globally configured default model. For
+  strict JSON-rubric consistency you can point distill at a stronger model
+  via `WATCHMEN_DISTILL_MODEL` or `--model`.
 - Similarity now defaults to low-noise skill metadata, with
   `--scope skill-md` and `--scope folder` for broader matching when wanted.
 - `watchmen distill <project> --local` skips the LLM judge and shows only the
