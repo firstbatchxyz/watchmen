@@ -161,8 +161,12 @@ def test_sync_from_codex_upserts_on_repeat(fresh_corpus, tmp_path):
 
     # Codex bumps the row: more tokens, status → complete.
     src = sqlite3.connect(state_db)
+    # Numeric literals in raw SQL can't use Python's underscore separator —
+    # SQLite (especially the newer build on Ubuntu CI) tokenizes the
+    # underscore as a separate token and errors. Underscores are fine in
+    # Python-side `int` literals, but inside the SQL string they must go.
     src.execute(
-        "UPDATE thread_goals SET tokens_used=5000, status='complete', updated_at_ms=1779_400_500_000 WHERE goal_id='goal-002'"
+        "UPDATE thread_goals SET tokens_used=5000, status='complete', updated_at_ms=1779400500000 WHERE goal_id='goal-002'"
     )
     src.commit()
     src.close()
