@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS goals (
     thread_id TEXT NOT NULL,
     project_dir TEXT,
     objective TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('active','paused','budget_limited','complete')),
+    status TEXT NOT NULL CHECK(status IN ('active','paused','blocked','usage_limited','budget_limited','complete')),
     token_budget INTEGER,
     tokens_used INTEGER NOT NULL DEFAULT 0,
     time_used_seconds INTEGER NOT NULL DEFAULT 0,
@@ -176,7 +176,7 @@ CREATE TABLE IF NOT EXISTS goals (
     thread_id TEXT NOT NULL,
     project_dir TEXT,
     objective TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('active','paused','budget_limited','complete')),
+    status TEXT NOT NULL CHECK(status IN ('active','paused','blocked','usage_limited','budget_limited','complete')),
     token_budget INTEGER,
     tokens_used INTEGER NOT NULL DEFAULT 0,
     time_used_seconds INTEGER NOT NULL DEFAULT 0,
@@ -189,6 +189,55 @@ CREATE INDEX IF NOT EXISTS idx_goals_project ON goals(project_dir);
 CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status);
 CREATE INDEX IF NOT EXISTS idx_goals_agent ON goals(agent);
 """
+
+
+def _migrate_goals_check_constraint(conn: sqlite3.Connection) -> None:
+    """Codex migration 33 ("thread goal stopped statuses", 2026-05-22) added
+    `blocked` and `usage_limited` to the goal status enum. Any in-flight
+    install with an earlier 4-status CHECK on its `goals` table will reject
+    the new statuses on INSERT.
+
+    SQLite can't ALTER a CHECK constraint in place, so we rebuild the table
+    via temp swap when the existing CHECK is missing either new value.
+    No-op when the constraint is current."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='goals'"
+    ).fetchone()
+    if row is None or row[0] is None:
+        return
+    sql_text = row[0]
+    if "blocked" in sql_text and "usage_limited" in sql_text:
+        return
+
+    conn.executescript("""
+        CREATE TABLE goals_new (
+            goal_id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            project_dir TEXT,
+            objective TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('active','paused','blocked','usage_limited','budget_limited','complete')),
+            token_budget INTEGER,
+            tokens_used INTEGER NOT NULL DEFAULT 0,
+            time_used_seconds INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT,
+            updated_at TEXT,
+            agent TEXT NOT NULL DEFAULT 'codex'
+        );
+        INSERT INTO goals_new
+            (goal_id, thread_id, project_dir, objective, status,
+             token_budget, tokens_used, time_used_seconds,
+             created_at, updated_at, agent)
+        SELECT goal_id, thread_id, project_dir, objective, status,
+               token_budget, tokens_used, time_used_seconds,
+               created_at, updated_at, agent
+        FROM goals;
+        DROP TABLE goals;
+        ALTER TABLE goals_new RENAME TO goals;
+        CREATE INDEX IF NOT EXISTS idx_goals_thread ON goals(thread_id);
+        CREATE INDEX IF NOT EXISTS idx_goals_project ON goals(project_dir);
+        CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status);
+        CREATE INDEX IF NOT EXISTS idx_goals_agent ON goals(agent);
+    """)
 
 
 def migrate_schema() -> None:
@@ -220,6 +269,7 @@ def migrate_schema() -> None:
                 _migrate_sessions_columns(conn)
                 _migrate_tool_calls_columns(conn)
                 conn.executescript(_ENSURE_GOALS_TABLE)
+                _migrate_goals_check_constraint(conn)
                 conn.commit()
         finally:
             conn.close()

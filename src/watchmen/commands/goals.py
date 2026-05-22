@@ -124,31 +124,52 @@ def _render_project_detail(console, project_key: str) -> int:
     from rich.table import Table
     from watchmen import state
 
+    # Unlike `subagents --project`, goal data flows from codex's own
+    # `~/.codex/.../threads.cwd` field — it exists independent of whether
+    # the user has registered the project with `watchmen track`. Honor a
+    # tracked project key when one matches (gives the user the nice repo
+    # display), but fall through to a direct project_dir substring match
+    # for untracked dirs codex naturally writes goals into.
     p = state.get_project(project_key)
-    if p is None:
-        console.print(yellow(f"project '{project_key}' is not tracked."))
-        console.print(dim("  Run `watchmen list` to see tracked projects."))
-        return 1
+    source_repo = p["source_repo"] if p else project_key
+    goals = wm_goals.list_for_project(project_key, source_repo, limit=50)
 
-    goals = wm_goals.list_for_project(project_key, p["source_repo"], limit=50)
     console.print()
     console.print(bold(f"Codex goals — {project_key}"))
+    if p is None and goals:
+        console.print(dim(
+            "  (not a tracked watchmen project — matched by codex cwd substring)"
+        ))
     if not goals:
         console.print(dim("  No codex goals captured for this project."))
+        if p is None:
+            console.print(dim(
+                "  `watchmen list` shows your tracked projects. Goals also show "
+                "up for any codex thread's cwd containing this substring."
+            ))
         return 0
 
-    status_counts = {"complete": 0, "active": 0, "paused": 0, "budget_limited": 0}
+    status_counts = {s: 0 for s in (
+        "complete", "active", "paused", "blocked", "usage_limited", "budget_limited",
+    )}
     total_cost = 0.0
     for g in goals:
         status_counts[g.status] = status_counts.get(g.status, 0) + 1
         total_cost += g.cost_usd
-    console.print(dim(
-        f"  {len(goals)} goals  ·  {_money(total_cost)} total  ·  "
-        f"[green]{status_counts['complete']} done[/green] · "
-        f"[cyan]{status_counts['active']} active[/cyan] · "
-        f"[yellow]{status_counts['paused']} paused[/yellow] · "
-        f"[red]{status_counts['budget_limited']} budget[/red]"
-    ))
+    bits = [
+        f"{len(goals)} goals", f"{_money(total_cost)} total",
+        f"[green]{status_counts['complete']} done[/green]",
+        f"[cyan]{status_counts['active']} active[/cyan]",
+    ]
+    if status_counts["paused"]:
+        bits.append(f"[yellow]{status_counts['paused']} paused[/yellow]")
+    if status_counts["blocked"]:
+        bits.append(f"[yellow]{status_counts['blocked']} blocked[/yellow]")
+    if status_counts["usage_limited"]:
+        bits.append(f"[red]{status_counts['usage_limited']} usage-limited[/red]")
+    if status_counts["budget_limited"]:
+        bits.append(f"[red]{status_counts['budget_limited']} budget-limited[/red]")
+    console.print(dim("  " + "  ·  ".join(bits)))
     console.print()
 
     t = Table(header_style="cyan", show_lines=False, expand=False)

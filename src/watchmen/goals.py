@@ -47,7 +47,17 @@ _CODEX_DIR = Path.home() / ".codex"
 # Valid codex goal statuses per the SQLite CHECK constraint. We mirror exactly
 # so an unknown future variant trips the corpus.db CHECK at insert time rather
 # than silently corrupting the aggregation.
-_VALID_STATUSES = {"active", "paused", "budget_limited", "complete"}
+#
+# Codex migration timeline:
+#   - Migration 29 "thread goals" (2026-04-13): 4 statuses — active, paused,
+#     budget_limited, complete.
+#   - Migration 33 "thread goal stopped statuses" (2026-05-22): added
+#     `blocked` and `usage_limited`. Migration 34 "drop thread goals"
+#     simultaneously moved the table from state_*.sqlite into a dedicated
+#     goals_*.sqlite (PR #23300).
+_VALID_STATUSES = {
+    "active", "paused", "blocked", "usage_limited", "budget_limited", "complete",
+}
 
 
 def _conn_ro() -> sqlite3.Connection | None:
@@ -69,59 +79,107 @@ def _ms_to_iso(ms: int | None) -> str | None:
         return None
 
 
-def _find_codex_state_db() -> Path | None:
-    """Codex versions its state DB filename (`state_5.sqlite` today,
-    `state_6.sqlite` tomorrow). Pick the highest-numbered file so we follow
-    codex forward on upgrade without code changes. Returns None when codex
-    isn't installed."""
+def _find_codex_dbs() -> tuple[Path | None, Path | None]:
+    """Resolve the two codex SQLite files we need:
+
+    - **goals DB**: ``~/.codex/goals_*.sqlite``. Codex migration 34
+      ("drop thread goals", 2026-05-22) moved the goal table into this
+      dedicated DB (PR #23300). Pre-migration codex installs keep the
+      table inside the state DB instead — in that case this returns
+      ``None`` for the goals DB and we fall back to reading goals from
+      the state DB directly.
+    - **state DB**: ``~/.codex/state_*.sqlite``. Always the source for
+      the ``threads.cwd`` lookup we use for project_dir attribution.
+
+    Both filenames are version-suffixed; we pick the highest-numbered file
+    so we follow codex forward on schema bumps without code changes."""
     if not _CODEX_DIR.exists():
-        return None
-    candidates = sorted(_CODEX_DIR.glob("state_*.sqlite"))
-    return candidates[-1] if candidates else None
+        return None, None
+    state = sorted(_CODEX_DIR.glob("state_*.sqlite"))
+    goals = sorted(_CODEX_DIR.glob("goals_*.sqlite"))
+    return (goals[-1] if goals else None), (state[-1] if state else None)
 
 
-def sync_from_codex(conn: sqlite3.Connection, *, codex_db: Path | None = None) -> int:
+def sync_from_codex(
+    conn: sqlite3.Connection,
+    *,
+    goals_db: Path | None = None,
+    state_db: Path | None = None,
+) -> int:
     """Read codex thread_goals into corpus.db::goals. Returns the number of
-    rows written. No-op if codex isn't installed or the goals table is empty.
+    rows written. No-op if codex isn't installed or has no goals yet.
 
-    Strategy: full replace per sync. The codex table is small (one row per
-    thread that ever had a goal) and we don't track per-thread mtimes, so
-    incremental sync would be more code than it's worth. UPSERTs into goals
-    so existing rows get refreshed token counts/status when codex updates them.
+    Reads from the dedicated `goals_*.sqlite` (codex 0.133.0+ post-
+    migration-34) when present, and falls back to `state_*.sqlite` for
+    older codex installs that still keep `thread_goals` colocated with
+    `threads`. In either case `threads.cwd` always comes from the state
+    DB — that table never moved.
+
+    Strategy: full replace per sync. The codex table is small (one row
+    per thread that ever had a goal) and we don't track per-thread
+    mtimes, so incremental sync would be more code than it's worth.
+    UPSERTs into goals so existing rows get refreshed token counts /
+    status when codex updates them.
     """
-    db = codex_db or _find_codex_state_db()
-    if db is None or not db.exists():
+    resolved_goals = goals_db
+    resolved_state = state_db
+    if resolved_goals is None and resolved_state is None:
+        resolved_goals, resolved_state = _find_codex_dbs()
+
+    # The threads table lives in state — we need it for project_dir.
+    if resolved_state is None or not resolved_state.exists():
         return 0
 
     try:
-        src = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        src = sqlite3.connect(f"file:{resolved_state}?mode=ro", uri=True)
     except sqlite3.Error:
         return 0
 
     src.row_factory = sqlite3.Row
     try:
+        # Prefer the dedicated goals DB (post-migration-34 codex). When it
+        # exists, ATTACH it to the open state-DB connection so we can JOIN
+        # `goals_db.thread_goals` against `threads` in one SQL statement.
+        # Otherwise read from `thread_goals` colocated inside the state DB.
+        if resolved_goals is not None and resolved_goals.exists():
+            try:
+                src.execute(
+                    f"ATTACH DATABASE 'file:{resolved_goals}?mode=ro' AS goals_db"
+                )
+            except sqlite3.OperationalError:
+                # ATTACH can fail on some sqlite builds with URI mode + ro;
+                # retry with a plain path.
+                src.execute(f"ATTACH DATABASE '{resolved_goals}' AS goals_db")
+            goals_source = "goals_db.thread_goals"
+        else:
+            goals_source = "thread_goals"
+
         # JOIN to threads for project_dir (cwd). LEFT JOIN so a goal with a
         # missing thread row (orphan, shouldn't happen but be defensive)
         # still lands with project_dir=NULL rather than vanishing.
-        rows = src.execute(
-            """
-            SELECT g.thread_id,
-                   g.goal_id,
-                   g.objective,
-                   g.status,
-                   g.token_budget,
-                   g.tokens_used,
-                   g.time_used_seconds,
-                   g.created_at_ms,
-                   g.updated_at_ms,
-                   t.cwd AS project_dir
-            FROM thread_goals g
-            LEFT JOIN threads t ON t.id = g.thread_id
-            """
-        ).fetchall()
-    except sqlite3.OperationalError:
-        # Older codex state DBs predate the thread_goals table — treat as empty.
-        return 0
+        try:
+            rows = src.execute(
+                f"""
+                SELECT g.thread_id,
+                       g.goal_id,
+                       g.objective,
+                       g.status,
+                       g.token_budget,
+                       g.tokens_used,
+                       g.time_used_seconds,
+                       g.created_at_ms,
+                       g.updated_at_ms,
+                       t.cwd AS project_dir
+                FROM {goals_source} g
+                LEFT JOIN threads t ON t.id = g.thread_id
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Either: the dedicated goals DB exists but has no `thread_goals`
+            # yet (codex created the file but hasn't populated it), or the
+            # state DB doesn't have `thread_goals` (post-migration-34 with
+            # no goals_db.sqlite). Either way, empty result.
+            return 0
     finally:
         src.close()
 
