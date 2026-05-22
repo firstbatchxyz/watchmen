@@ -9,11 +9,13 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 ### Fixed — `watchmen distill` against the chatgpt provider
 - Semantic distillation (the default) was 400-ing against
   `chatgpt.com/backend-api/codex/responses` because the chat-completions
-  kwargs the judge passes (`temperature=0`, `max_tokens=900`) leaked
-  verbatim into the Responses-API body. Providers now own kwarg
-  translation via a new `apply_extra_payload` hook: the chatgpt provider
-  renames `max_tokens` → `max_output_tokens` and drops `temperature` /
-  `response_format`, which the codex/responses endpoint does not accept.
+  kwargs the judge passes (`temperature=0`, `max_tokens=900`,
+  `response_format=...`) leaked verbatim into the Responses-API body.
+  Providers now own kwarg translation via a new `apply_extra_payload`
+  hook: the chatgpt provider drops all three kwargs before they hit the
+  wire. The codex OAuth endpoint rejects `max_output_tokens` outright
+  (probed empirically) — codex itself sends no length cap and relies on
+  `reasoning.effort` + streaming aggregation, so we follow suit.
 - Workaround that's no longer needed: switching `watchmen settings
   provider` to `claude-pro` / `openrouter` / `anthropic` before running
   distill.

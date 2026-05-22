@@ -669,12 +669,15 @@ def test_chat_call_extra_payload_overrides_get_merged(monkeypatch):
     assert body["max_tokens"] == 500
 
 
-def test_chatgpt_apply_extra_payload_translates_chat_completions_kwargs():
+def test_chatgpt_apply_extra_payload_drops_chat_completions_kwargs():
     """Regression for the distill 400 bug: callers (skillmesh's semantic
     judge) pass chat-completions kwargs that are illegal on the
-    codex/responses endpoint. The chatgpt provider renames `max_tokens`
-    to `max_output_tokens` and drops `temperature` + `response_format`
-    rather than leaking them into the wire body."""
+    codex/responses OAuth endpoint. Probed empirically against
+    `chatgpt.com/backend-api/codex/responses` — the endpoint rejects
+    `max_output_tokens` outright with
+    `{"detail":"Unsupported parameter: max_output_tokens"}`, so the
+    chatgpt provider must drop `max_tokens` entirely (not rename it)
+    along with `temperature` and `response_format`."""
     prov = providers.get_provider("chatgpt")
     body = prov.translate_request(
         model="gpt-5.4-mini",
@@ -685,11 +688,12 @@ def test_chatgpt_apply_extra_payload_translates_chat_completions_kwargs():
         "temperature": 0,
         "max_tokens": 900,
         "response_format": {"type": "json_object"},
+        "max_output_tokens": 1200,
     })
     assert "temperature" not in body
     assert "response_format" not in body
     assert "max_tokens" not in body
-    assert body["max_output_tokens"] == 900
+    assert "max_output_tokens" not in body
 
 
 def test_chatgpt_apply_extra_payload_passes_unknown_kwargs_through():
