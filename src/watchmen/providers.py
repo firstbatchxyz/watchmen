@@ -144,6 +144,20 @@ class Provider:
         shape. Default is identity."""
         return raw
 
+    def apply_extra_payload(self, body: dict, extra: dict) -> dict:
+        """Merge caller-supplied chat-completions kwargs (temperature,
+        max_tokens, response_format, ...) into the translated request body.
+
+        Default behavior merges verbatim — fine for OpenAI-shape providers
+        (openrouter/openai) and for Anthropic (which accepts the same
+        top-level `temperature` / `max_tokens` keys). Providers whose wire
+        format uses different parameter names override to rename/drop
+        unsupported kwargs."""
+        for k, v in extra.items():
+            if v is not None:
+                body[k] = v
+        return body
+
     def call(self, client, url: str, headers: dict, body: dict, *,
              max_retries: int = 4, log=None, label: str = "") -> dict:
         """Custom transport hook. Default returns None to signal "use the
@@ -675,6 +689,37 @@ class ChatGPT(Provider):
         }
         if responses_tools:
             body["tools"] = responses_tools
+        return body
+
+    def apply_extra_payload(self, body: dict, extra: dict) -> dict:
+        """The Responses API accepts a different kwarg surface than
+        chat-completions. Rename `max_tokens` → `max_output_tokens` (the
+        Responses-API spelling) and drop kwargs the codex/responses
+        endpoint rejects outright:
+
+        - `temperature`: not accepted on this endpoint (reasoning models
+          control determinism via `reasoning.effort` instead, which we
+          already set in `translate_request`).
+        - `response_format`: replaced in the Responses API by a nested
+          `text.format` block we don't currently emit. Silently dropping
+          here means callers can keep passing the chat-completions kwarg
+          for the openrouter/openai path without crashing the chatgpt
+          path; structured-output enforcement on chatgpt would need
+          plumbing through `text.format` separately.
+
+        Any other kwarg is merged verbatim — leaves room for future
+        Responses-API-native params (e.g. `parallel_tool_calls`) without
+        another override."""
+        dropped = ("temperature", "response_format")
+        for k, v in extra.items():
+            if v is None:
+                continue
+            if k == "max_tokens":
+                body["max_output_tokens"] = v
+            elif k in dropped:
+                continue
+            else:
+                body[k] = v
         return body
 
     def call(self, client, url: str, headers: dict, body: dict, *,

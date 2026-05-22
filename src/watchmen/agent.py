@@ -272,9 +272,7 @@ def chat_call(
 
     headers = prov.headers(key, agent_name=agent_name)
     body = prov.translate_request(model=model, messages=messages, tools=tools or [])
-    for k, v in extra_payload.items():
-        if v is not None:
-            body[k] = v
+    body = prov.apply_extra_payload(body, extra_payload)
 
     # Providers with non-chat-completions transports (e.g. streaming-only
     # Responses API for ChatGPT OAuth) override `call()`. We let them own

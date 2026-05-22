@@ -667,3 +667,50 @@ def test_chat_call_extra_payload_overrides_get_merged(monkeypatch):
     body = kwargs["json"]
     assert body["temperature"] == 0.3
     assert body["max_tokens"] == 500
+
+
+def test_chatgpt_apply_extra_payload_translates_chat_completions_kwargs():
+    """Regression for the distill 400 bug: callers (skillmesh's semantic
+    judge) pass chat-completions kwargs that are illegal on the
+    codex/responses endpoint. The chatgpt provider renames `max_tokens`
+    to `max_output_tokens` and drops `temperature` + `response_format`
+    rather than leaking them into the wire body."""
+    prov = providers.get_provider("chatgpt")
+    body = prov.translate_request(
+        model="gpt-5.4-mini",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+    )
+    body = prov.apply_extra_payload(body, {
+        "temperature": 0,
+        "max_tokens": 900,
+        "response_format": {"type": "json_object"},
+    })
+    assert "temperature" not in body
+    assert "response_format" not in body
+    assert "max_tokens" not in body
+    assert body["max_output_tokens"] == 900
+
+
+def test_chatgpt_apply_extra_payload_passes_unknown_kwargs_through():
+    """Unrecognized kwargs fall through unchanged so future Responses-API
+    params (e.g. `parallel_tool_calls`) work without another provider
+    override."""
+    prov = providers.get_provider("chatgpt")
+    body = prov.translate_request(
+        model="gpt-5.4-mini",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+    )
+    body = prov.apply_extra_payload(body, {"parallel_tool_calls": False})
+    assert body["parallel_tool_calls"] is False
+
+
+def test_default_apply_extra_payload_skips_none_values():
+    """`None`-valued kwargs are dropped, matching the pre-refactor merge
+    behavior. chat_call relies on this to support optional caller params."""
+    prov = providers.get_provider("openrouter")
+    body = {"model": "m", "messages": []}
+    body = prov.apply_extra_payload(body, {"temperature": None, "max_tokens": 100})
+    assert "temperature" not in body
+    assert body["max_tokens"] == 100

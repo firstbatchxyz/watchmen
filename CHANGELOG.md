@@ -6,6 +6,18 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Fixed — `watchmen distill` against the chatgpt provider
+- Semantic distillation (the default) was 400-ing against
+  `chatgpt.com/backend-api/codex/responses` because the chat-completions
+  kwargs the judge passes (`temperature=0`, `max_tokens=900`) leaked
+  verbatim into the Responses-API body. Providers now own kwarg
+  translation via a new `apply_extra_payload` hook: the chatgpt provider
+  renames `max_tokens` → `max_output_tokens` and drops `temperature` /
+  `response_format`, which the codex/responses endpoint does not accept.
+- Workaround that's no longer needed: switching `watchmen settings
+  provider` to `claude-pro` / `openrouter` / `anthropic` before running
+  distill.
+
 ### Fixed — Codex subagent telemetry
 - Before this change the codex adapter always set `is_subagent=0`, so
   every codex session counted toward the user-facing top-level total
