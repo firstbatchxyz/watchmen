@@ -82,6 +82,31 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool_name);
 -- idx_tool_calls_skill is created inside `_migrate_tool_calls_columns`
 -- so legacy DBs missing the `skill_name` column don't blow up here.
+
+-- `goals` mirrors codex 0.133.0's `thread_goals` table (lives in
+-- ~/.codex/state_*.sqlite). Codex models a single active goal per thread,
+-- so `thread_id` is the natural foreign key into `sessions.session_id`.
+-- We denormalize `project_dir` from the joined session at sync time so
+-- per-project queries don't need a JOIN. `agent` is forward-looking —
+-- only codex populates this table today, but the column is there so a
+-- future CC TodoWrite ingestion can land without a migration.
+CREATE TABLE IF NOT EXISTS goals (
+    goal_id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    project_dir TEXT,
+    objective TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active','paused','budget_limited','complete')),
+    token_budget INTEGER,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    time_used_seconds INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT,
+    updated_at TEXT,
+    agent TEXT NOT NULL DEFAULT 'codex'
+);
+CREATE INDEX IF NOT EXISTS idx_goals_thread ON goals(thread_id);
+CREATE INDEX IF NOT EXISTS idx_goals_project ON goals(project_dir);
+CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status);
+CREATE INDEX IF NOT EXISTS idx_goals_agent ON goals(agent);
 """
 
 
@@ -91,7 +116,12 @@ def init_db(*, full: bool = False) -> sqlite3.Connection:
     pending column migrations on the existing schema."""
     conn = sqlite3.connect(DB_PATH)
     if full:
-        conn.executescript("DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS prompts; DROP TABLE IF EXISTS tool_calls;")
+        conn.executescript(
+            "DROP TABLE IF EXISTS sessions; "
+            "DROP TABLE IF EXISTS prompts; "
+            "DROP TABLE IF EXISTS tool_calls; "
+            "DROP TABLE IF EXISTS goals;"
+        )
     conn.executescript(_CREATE_TABLES)
     _migrate_sessions_columns(conn)
     _migrate_tool_calls_columns(conn)
@@ -140,14 +170,42 @@ def _migrate_tool_calls_columns(conn: sqlite3.Connection) -> None:
         )
 
 
+_ENSURE_GOALS_TABLE = """
+CREATE TABLE IF NOT EXISTS goals (
+    goal_id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    project_dir TEXT,
+    objective TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active','paused','budget_limited','complete')),
+    token_budget INTEGER,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    time_used_seconds INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT,
+    updated_at TEXT,
+    agent TEXT NOT NULL DEFAULT 'codex'
+);
+CREATE INDEX IF NOT EXISTS idx_goals_thread ON goals(thread_id);
+CREATE INDEX IF NOT EXISTS idx_goals_project ON goals(project_dir);
+CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status);
+CREATE INDEX IF NOT EXISTS idx_goals_agent ON goals(agent);
+"""
+
+
 def migrate_schema() -> None:
-    """Open corpus.db just to run pending column migrations, then close.
-    Called once from `cli.main()` so every watchmen command auto-applies
-    pending schema migrations without the user having to know about
-    `watchmen ingest --full`. No-op when the DB doesn't exist yet (fresh
-    install) or when the schema is already current. Swallows sqlite errors
-    so a degraded DB can't break CLI startup — the real command will
-    surface the actual problem."""
+    """Open corpus.db just to run pending column migrations + create any
+    newly-added tables, then close. Called once from `cli.main()` so every
+    watchmen command auto-applies pending schema migrations without the
+    user having to know about `watchmen ingest --full`. No-op when the DB
+    doesn't exist yet (fresh install). Swallows sqlite errors so a
+    degraded DB can't break CLI startup — the real command will surface
+    the actual problem.
+
+    Why only goals (not the full `_CREATE_TABLES`): running the full
+    canonical script against a legacy DB also re-runs the
+    `CREATE INDEX ... ON sessions(agent) / tool_calls(tool_name)` lines,
+    which die on partial legacy schemas missing those columns. Targeted
+    DDL for newly-added tables avoids re-touching settled tables and
+    keeps migrations idempotent + minimal."""
     if not DB_PATH.exists():
         return
     try:
@@ -161,6 +219,7 @@ def migrate_schema() -> None:
             if row is not None:
                 _migrate_sessions_columns(conn)
                 _migrate_tool_calls_columns(conn)
+                conn.executescript(_ENSURE_GOALS_TABLE)
                 conn.commit()
         finally:
             conn.close()
@@ -263,6 +322,21 @@ def scan_all(*, full: bool = False) -> None:
             parsed += 1
 
     conn.commit()
+
+    # Codex 0.133.0+ goals come from a separate SQLite store (not from the
+    # rollout JSONLs the per-file loop processed above). Sync them now so a
+    # single `watchmen ingest` keeps the goals lens fresh. No-op when codex
+    # isn't installed or the thread_goals table is empty.
+    try:
+        from watchmen import goals as _wm_goals
+        goal_rows = _wm_goals.sync_from_codex(conn)
+        if goal_rows:
+            print(f"  codex goals synced: {goal_rows} rows", flush=True)
+    except Exception as ex:
+        # Goal sync must never break corpus ingestion — surface the error
+        # but let the main `parsed/skipped/failed` numbers stand.
+        print(f"  ! goal sync failed: {ex}", flush=True)
+
     conn.close()
     print(f"Done. parsed={parsed} skipped={skipped} failed={failed}. DB at {DB_PATH}", flush=True)
 

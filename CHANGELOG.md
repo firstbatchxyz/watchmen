@@ -6,6 +6,30 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Added — `watchmen goals` (codex 0.133.0+)
+- New CLI command surfacing the goal-level lens for codex sessions.
+  Codex 0.133.0 introduced first-class goals (`~/.codex/state_*.sqlite::
+  thread_goals` — one objective + status + token budget + tokens_used +
+  time_used_seconds per thread). Watchmen now syncs that table into
+  `corpus.db::goals` on every `watchmen ingest` and surfaces:
+  - `watchmen goals` — per-project rollup (goals count, status mix,
+    tokens, cost). Cost is approximated from the joined session's
+    `cost_usd` since codex models one goal per thread.
+  - `watchmen goals --project <key>` — per-goal detail: objective text,
+    status, tokens used vs budget, wall-clock time, cost.
+- Status enum mirrors codex's CHECK constraint exactly
+  (`active | paused | budget_limited | complete`) so a future codex
+  release that adds a new variant trips the corpus.db constraint
+  instead of silently corrupting aggregations.
+- Codex-only in v1. Claude Code's `/goal` is a free-text user prompt
+  with no structured completion signal, and `TodoWrite` ranged across
+  155 local CC sessions to find zero invocations — both data sources
+  are too thin to build a reliable lens against today. Re-evaluate when
+  one of them accumulates real usage.
+- Schema migration is targeted (creates `goals` + 4 indexes, doesn't
+  re-run the full `_CREATE_TABLES` block) so legacy DBs missing the
+  `agent` / `tool_name` columns can't trip up the goal-table landing.
+
 ### Fixed — `watchmen distill` against the chatgpt provider
 - Semantic distillation (the default) was 400-ing against
   `chatgpt.com/backend-api/codex/responses` because the chat-completions

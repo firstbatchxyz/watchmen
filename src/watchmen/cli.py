@@ -98,6 +98,7 @@ from watchmen.commands.pipeline import (
 )
 from watchmen.commands.lifecycle import cmd_down, cmd_up
 from watchmen.commands.subagents import cmd_subagents
+from watchmen.commands.goals import cmd_goals
 from watchmen.commands.distill import cmd_distill
 from watchmen.util import find_changelog as _find_changelog
 
@@ -1204,6 +1205,8 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("why",        "provenance for a skill: source sessions + curator rationale"),
         ("recent",     "git log of curator artifact changes (last N days)"),
         ("insights",   "cross-repo digest — sessions, skills, patterns, friction"),
+        ("subagents",  "subagent usage and cost share per agent / project"),
+        ("goals",      "codex goal usage and cost per project (codex 0.133.0+)"),
         ("changelog",  "render the watchmen CHANGELOG.md"),
         ("open",       "open the viewer in your browser"),
         ("logs",       "tail scheduler logs (daemon | viewer | all)"),
@@ -1427,6 +1430,16 @@ def main(argv: list[str] | None = None) -> int:
         help="show detail for one project key (default: global overview)",
     )
     p_subagents.set_defaults(func=cmd_subagents)
+
+    p_goals = sub.add_parser(
+        "goals",
+        help="surface codex goal usage and cost per project (codex 0.133.0+)",
+    )
+    p_goals.add_argument(
+        "--project", default=None,
+        help="show per-goal detail for one project key (default: global overview)",
+    )
+    p_goals.set_defaults(func=cmd_goals)
 
     p_track = sub.add_parser("track", help="add a project to tracking")
     p_track.add_argument("project", help="project key (used to filter corpus by project_dir substring)")
