@@ -83,6 +83,29 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool_name);
 -- idx_tool_calls_skill is created inside `_migrate_tool_calls_columns`
 -- so legacy DBs missing the `skill_name` column don't blow up here.
 
+-- `turns` persists per-assistant-turn cost that was previously computed and
+-- then discarded into `sessions.cost_usd`. Keeping it lets us attribute cost
+-- to the specific skill that was active during a turn (the per-skill cost
+-- signal that drives route suggestions). Invariant: for any adapter that
+-- emits turns, SUM(turns.cost_usd) over a session == sessions.cost_usd.
+-- `skill_name` is the skill active during the turn (Claude Code only —
+-- Codex/pi don't expose skill activations, so their turns carry NULL).
+CREATE TABLE IF NOT EXISTS turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT,
+    turn_index INTEGER,
+    timestamp TEXT,
+    model TEXT,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    skill_name TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
+CREATE INDEX IF NOT EXISTS idx_turns_skill ON turns(skill_name);
+
 -- `goals` mirrors codex 0.133.0's `thread_goals` table (lives in
 -- ~/.codex/state_*.sqlite). Codex models a single active goal per thread,
 -- so `thread_id` is the natural foreign key into `sessions.session_id`.
@@ -120,6 +143,7 @@ def init_db(*, full: bool = False) -> sqlite3.Connection:
             "DROP TABLE IF EXISTS sessions; "
             "DROP TABLE IF EXISTS prompts; "
             "DROP TABLE IF EXISTS tool_calls; "
+            "DROP TABLE IF EXISTS turns; "
             "DROP TABLE IF EXISTS goals;"
         )
     conn.executescript(_CREATE_TABLES)
@@ -168,6 +192,25 @@ def _migrate_tool_calls_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tool_calls_skill ON tool_calls(skill_name)"
         )
+
+
+_ENSURE_TURNS_TABLE = """
+CREATE TABLE IF NOT EXISTS turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT,
+    turn_index INTEGER,
+    timestamp TEXT,
+    model TEXT,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    skill_name TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
+CREATE INDEX IF NOT EXISTS idx_turns_skill ON turns(skill_name);
+"""
 
 
 _ENSURE_GOALS_TABLE = """
