@@ -697,6 +697,129 @@ def test_switch_harness_advises_instead_of_writing_unrunnable_file(tmp_path, mon
     assert "Recommended model:" not in skill_md
 
 
+def test_switch_harness_dispatches_via_ax_when_configured(tmp_path, monkeypatch):
+    """With WATCHMEN_AX_SERVER set and an AX wrapper for the winning harness, a
+    switch-harness decision emits a dispatcher subagent that calls `ax exec`
+    instead of the advisory line — turning the recommendation into a real
+    cross-runtime delegation. The frontmatter must NOT pin the foreign model."""
+    from watchmen.route_rewrite import apply_route_rewrites
+
+    monkeypatch.setenv("WATCHMEN_AX_SERVER", "localhost:8494")
+    monkeypatch.setenv("WATCHMEN_AX_BIN", "ax")
+
+    repo = tmp_path / "src-repo"
+    repo.mkdir()
+    _setup_project(tmp_path, monkeypatch, "p", str(repo))
+
+    skill_dir = tmp_path / "bundles" / "p" / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\n---\nbody\n", encoding="utf-8",
+    )
+    result = _route_result(tmp_path, "demo-skill", [
+        _decision("claude_code", "anthropic/claude-opus-4-7",
+                  "openai/gpt-5-codex", label="switch-harness",
+                  recommended_harness="codex"),
+    ])
+    outcomes = apply_route_rewrites(result, repo_root=str(repo))
+
+    # A dispatcher IS written this time (unlike the advisory path).
+    router = repo / ".claude" / "agents" / "demo-skill-router.md"
+    assert router.exists()
+    body = router.read_text(encoding="utf-8")
+    # It delegates through AX to the winning harness's AX agent...
+    assert "ax exec --once --server localhost:8494 --agent codex" in body
+    assert "[model] openai/gpt-5-codex" in body
+    assert str(repo) in body                       # [workspace] header
+    assert "<TASK>" in body                        # task placeholder
+    # ...and never pins the foreign model in the Claude subagent frontmatter.
+    assert "model: openai/gpt-5-codex" not in body
+
+    by_kind = {(o.harness, o.artifact_kind): o for o in outcomes}
+    assert ("claude_code", "ax-router") in by_kind
+    assert ("claude_code", "advisory") not in by_kind
+
+    skill_md = (skill_dir / "SKILL.md").read_text()
+    assert "via AX" in skill_md
+    assert "subagent_type=\"demo-skill-router\"" in skill_md
+    # The independent foreign-model line is still suppressed.
+    assert "Recommended model:" not in skill_md
+
+
+def test_switch_harness_falls_back_to_advisory_when_ax_unset(tmp_path, monkeypatch):
+    """No WATCHMEN_AX_SERVER => default behavior: advisory, no dispatcher."""
+    from watchmen.route_rewrite import apply_route_rewrites
+
+    monkeypatch.delenv("WATCHMEN_AX_SERVER", raising=False)
+
+    repo = tmp_path / "src-repo"
+    repo.mkdir()
+    _setup_project(tmp_path, monkeypatch, "p", str(repo))
+
+    skill_dir = tmp_path / "bundles" / "p" / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\n---\nbody\n", encoding="utf-8",
+    )
+    result = _route_result(tmp_path, "demo-skill", [
+        _decision("claude_code", "anthropic/claude-opus-4-7",
+                  "openai/gpt-5-codex", label="switch-harness",
+                  recommended_harness="codex"),
+    ])
+    outcomes = apply_route_rewrites(result, repo_root=str(repo))
+
+    assert not (repo / ".claude" / "agents" / "demo-skill-router.md").exists()
+    by_kind = {(o.harness, o.artifact_kind): o for o in outcomes}
+    assert ("claude_code", "advisory") in by_kind
+    assert ("claude_code", "ax-router") not in by_kind
+
+
+def test_codex_source_dispatches_via_ax_inline(tmp_path, monkeypatch):
+    """Codex has no subagent file — its native artifact is a model profile that
+    can't invoke another runtime. So a Codex-source switch-harness route inlines
+    the `ax exec` call into the SKILL.md dispatch block; no profile file is
+    written, and the delegation targets the winning harness's AX agent."""
+    from watchmen import route_rewrite
+    from watchmen.route_rewrite import apply_route_rewrites
+
+    monkeypatch.setenv("WATCHMEN_AX_SERVER", "localhost:8494")
+    fake_home = tmp_path / "home"
+    (fake_home / ".codex").mkdir(parents=True)
+    monkeypatch.setattr(route_rewrite.Path, "home", staticmethod(lambda: fake_home))
+
+    repo = tmp_path / "src-repo"
+    repo.mkdir()
+    _setup_project(tmp_path, monkeypatch, "p", str(repo))
+
+    skill_dir = tmp_path / "bundles" / "p" / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\n---\nbody\n", encoding="utf-8",
+    )
+    # Codex's work wins on Claude Code for this skill -> delegate Codex -> CC.
+    result = _route_result(tmp_path, "demo-skill", [
+        _decision("codex", "openai/gpt-5.5",
+                  "anthropic/claude-opus-4-7", label="switch-harness",
+                  recommended_harness="claude_code"),
+    ])
+    outcomes = apply_route_rewrites(result, repo_root=str(repo))
+
+    # No codex profile file is written — dispatch lives in SKILL.md.
+    assert not (fake_home / ".codex" / "route-demo-skill.config.toml").exists()
+
+    by_kind = {(o.harness, o.artifact_kind): o for o in outcomes}
+    assert ("codex", "ax-dispatch") in by_kind
+    assert by_kind[("codex", "ax-dispatch")].action == "inline"
+    assert by_kind[("codex", "ax-dispatch")].path == ""
+
+    skill_md = (skill_dir / "SKILL.md").read_text()
+    assert "ax exec --once --server localhost:8494 --agent claude-code" in skill_md
+    assert "[model] anthropic/claude-opus-4-7" in skill_md
+    assert "<TASK>" in skill_md
+    assert "via AX" in skill_md
+    assert "Recommended model:" not in skill_md     # suppressed for ax-routed
+
+
 def test_foreign_candidate_winner_is_advised_not_emitted(tmp_path, monkeypatch):
     """A user-injected --candidate from another provider can win as a
     downshift (it's never labeled switch-harness because no current harness
