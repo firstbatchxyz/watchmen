@@ -201,6 +201,11 @@ def make_tools(*, source_repo: str, project_key: str) -> tuple[list[dict], dict]
             f.write(f"\n## {time.strftime('%Y-%m-%d %H:%M:%S')}\n{entry}\n")
         return "logged"
 
+    from watchmen.analyze import tool_fetch_pr_status
+
+    def fetch_pr_status(repo: str, pr_number: int, host: str | None = None) -> str:
+        return tool_fetch_pr_status(repo, pr_number, host)
+
     handlers = {
         "query_corpus": query_corpus,
         "read_session_full": read_session_full,
@@ -211,6 +216,7 @@ def make_tools(*, source_repo: str, project_key: str) -> tuple[list[dict], dict]
         "list_bundle_files": list_bundle_files,
         "read_bundle_file": read_bundle_file,
         "append_curation_log": append_curation_log,
+        "fetch_pr_status": fetch_pr_status,
     }
 
     # ── specs ──────────────────────────────────────────────────────────────
@@ -271,6 +277,21 @@ def make_tools(*, source_repo: str, project_key: str) -> tuple[list[dict], dict]
             "name": "append_curation_log",
             "description": "Append a timestamped entry to _curation_log.md (decisions, critic feedback, refinements).",
             "parameters": {"type": "object", "properties": {"entry": {"type": "string"}}, "required": ["entry"]},
+        }},
+        {"type": "function", "function": {
+            "name": "fetch_pr_status",
+            "description": (
+                "Look up a pull request's review state and latest comments. Use when a session opened "
+                "or updated a PR (visible in agent tool calls like create_pull_request, gh pr create, "
+                "or kai_create_pull_request). Returns reviews (APPROVED / CHANGES_REQUESTED / "
+                "COMMENTED) and the latest comments — these are the maintainer's feedback on the "
+                "agent's work."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "repo": {"type": "string", "description": "'owner/name' or a full repo/PR URL"},
+                "pr_number": {"type": "integer"},
+                "host": {"type": "string", "description": "Optional non-github host (e.g. a Forgejo domain). Defaults to github.com."},
+            }, "required": ["repo", "pr_number"]},
         }},
     ]
 

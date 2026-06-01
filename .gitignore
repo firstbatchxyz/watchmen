@@ -34,3 +34,6 @@ dist/
 .env
 .env.local
 *.bak.*
+
+# Marketing / demos (local-only, not part of the package)
+demos/

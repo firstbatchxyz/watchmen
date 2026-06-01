@@ -132,6 +132,13 @@ CANDIDATE_FINDER_PROMPT_TEMPLATE = dedent("""
       - It can be triggered by a specific kind of user request — you can describe the trigger.
       - Generalizing it (turning hardcoded paths/keys into args) preserves its usefulness.
 
+    For sessions that opened or updated a pull request, call fetch_pr_status to see how the
+    maintainer received it (approved, requested changes, merged, closed) and read review comments.
+    Failure outcomes (request_changes, close) point at concrete code-knowledge gaps in THIS
+    codebase. Skill candidates that would close those gaps are high-priority — prefer specific
+    codebase-grounded skills (e.g. "verify new helpers are referenced from the dispatch table
+    before returning") over generic workflow templates.
+
     Reject candidates that are:
       - Behavioral observations only ("task-direct", "low-ceremony communication", "thanks mate") —
         these are about the user, not skills.
@@ -1139,9 +1146,11 @@ def main():
             else:
                 print(f"      blocklist active ({len(blocklist)} slug(s)) but no candidates matched", flush=True)
 
-        if not candidates:
+        if not candidates and not args.skip_skills:
             print("no candidates — stopping.", flush=True)
             return
+        if not candidates and args.skip_skills:
+            print("no candidates — running stage 3 (CLAUDE.md) only.", flush=True)
 
         # ─── Stage 2: per-skill curator ───────────────────────────────────────
         # Pinned slugs are treated as forced cache hits — the curator skips

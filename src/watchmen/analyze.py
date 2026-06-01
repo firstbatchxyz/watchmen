@@ -185,6 +185,98 @@ def tool_query_corpus(sql: str, max_rows: int = 50):
     return json.dumps([dict(r) for r in rows], default=str, indent=2)
 
 
+def tool_fetch_pr_status(repo: str, pr_number: int, host: str | None = None):
+    """Look up a pull request's review state and latest comments.
+
+    Args:
+      repo: 'owner/name' (e.g. 'astral-sh/uv') or a full URL.
+      pr_number: integer PR number.
+      host: optional. If given, e.g. 'kai-bench-forgejo-production.up.railway.app',
+            uses that Forgejo/Gitea host. Otherwise github.com.
+
+    Returns JSON with: state, merged, reviews (list of {state, user, body}),
+    comments (latest 5 review-comments), and a short summary.
+
+    Auth: GITHUB_TOKEN for github.com; WATCHMEN_FORGEJO_TOKEN for forgejo hosts.
+    """
+    import os
+    import urllib.parse
+
+    repo = repo.strip()
+    if repo.startswith("http"):
+        u = urllib.parse.urlparse(repo)
+        host = host or u.netloc
+        path = u.path.strip("/").split("/")
+        if len(path) >= 2:
+            owner, name = path[0], path[1]
+        else:
+            return f"ERROR: bad repo url: {repo}"
+    elif "/" in repo:
+        owner, name = repo.split("/", 1)
+    else:
+        return f"ERROR: bad repo spec: {repo!r}; expected 'owner/name' or URL"
+
+    if host is None or "github.com" in host:
+        api_base = "https://api.github.com"
+        token = os.environ.get("GITHUB_TOKEN", "")
+    else:
+        scheme = "https" if not host.startswith("http") else ""
+        host_clean = host.replace("https://", "").replace("http://", "").rstrip("/")
+        api_base = f"{scheme}://{host_clean}/api/v1" if scheme else f"https://{host_clean}/api/v1"
+        token = os.environ.get("WATCHMEN_FORGEJO_TOKEN", "") or os.environ.get("FORGEJO_API_TOKEN", "")
+
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = (
+            f"token {token}" if "github.com" not in api_base else f"Bearer {token}"
+        )
+
+    try:
+        with httpx.Client(timeout=20.0, headers=headers) as client:
+            pr_r = client.get(f"{api_base}/repos/{owner}/{name}/pulls/{pr_number}")
+            if pr_r.status_code != 200:
+                return f"ERROR: PR fetch {pr_r.status_code}: {pr_r.text[:200]}"
+            pr = pr_r.json()
+            rev_r = client.get(f"{api_base}/repos/{owner}/{name}/pulls/{pr_number}/reviews")
+            reviews = rev_r.json() if rev_r.status_code == 200 else []
+            com_r = client.get(f"{api_base}/repos/{owner}/{name}/issues/{pr_number}/comments")
+            comments = com_r.json() if com_r.status_code == 200 else []
+    except Exception as e:
+        return f"ERROR: HTTP failure: {e}"
+
+    reviews_terse = [
+        {
+            "state": (r.get("state") or "").upper(),
+            "user": (r.get("user") or {}).get("login"),
+            "body": (r.get("body") or "")[:600],
+            "submitted_at": r.get("submitted_at"),
+        }
+        for r in (reviews or [])
+        if isinstance(r, dict)
+    ]
+    comments_terse = [
+        {
+            "user": (c.get("user") or {}).get("login"),
+            "body": (c.get("body") or "")[:600],
+            "created_at": c.get("created_at"),
+        }
+        for c in (comments or [])[-5:]
+        if isinstance(c, dict)
+    ]
+
+    out = {
+        "owner_repo": f"{owner}/{name}",
+        "number": pr_number,
+        "state": pr.get("state"),
+        "merged": pr.get("merged"),
+        "title": pr.get("title"),
+        "review_count": len(reviews_terse),
+        "reviews": reviews_terse[-5:],
+        "recent_comments": comments_terse,
+    }
+    return json.dumps(out, default=str, indent=2)
+
+
 TOOLS = [
     {"type": "function", "function": {
         "name": "list_activity_on",
@@ -222,6 +314,21 @@ TOOLS = [
         }, "required": ["sql"]},
     }},
     {"type": "function", "function": {
+        "name": "fetch_pr_status",
+        "description": (
+            "Look up a pull request's review state and latest comments. Use when a session opened "
+            "or updated a PR (visible in agent tool calls like create_pull_request, gh pr create, "
+            "or kai_create_pull_request, or referenced in prompts). Returns reviews (APPROVED / "
+            "CHANGES_REQUESTED / COMMENTED) and the latest comments — these are the maintainer's "
+            "feedback on the agent's work."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "repo": {"type": "string", "description": "'owner/name' (e.g. 'astral-sh/uv') or a full URL to the PR/repo."},
+            "pr_number": {"type": "integer"},
+            "host": {"type": "string", "description": "Optional non-github host (e.g. 'kai-bench-forgejo-production-d845.up.railway.app'). Defaults to github.com."},
+        }, "required": ["repo", "pr_number"]},
+    }},
+    {"type": "function", "function": {
         "name": "update_analysis",
         "description": "FINAL CALL — submit the updated running thesis as markdown. After this call the day's loop ends.",
         "parameters": {"type": "object", "properties": {
@@ -243,6 +350,12 @@ SYSTEM_PROMPT = dedent("""
 
     Be selective. Don't read every session in detail. Drill into the ones that look unusual,
     frustrated, or repetitive. Skim the rest. If a day reveals nothing new, say so concisely.
+
+    When a session opens or updates a pull request, call fetch_pr_status to see how the maintainer
+    received it (approved, requested changes, merged, closed) and read any review comments. PR
+    review feedback is the highest-signal source of what the agent did NOT know and SHOULD have
+    known about THIS codebase. Use it to populate the "Skill candidates" section with concrete,
+    codebase-specific entries that would have closed the gap.
 
     Output structure (markdown):
       # Usage Profile — {project} (running thesis)
@@ -358,6 +471,8 @@ def run_day(
                     result = tool_read_session_full(**args)
                 elif fn == "query_corpus":
                     result = tool_query_corpus(**args)
+                elif fn == "fetch_pr_status":
+                    result = tool_fetch_pr_status(**args)
                 else:
                     result = f"unknown tool: {fn}"
             except Exception as e:
