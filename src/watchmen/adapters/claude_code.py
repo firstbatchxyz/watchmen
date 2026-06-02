@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from watchmen.adapters._shared import normalize_error_signature
 from watchmen.metrics import turn_cost_usd
 from watchmen.paths import decode_project_dir
 
@@ -121,6 +122,11 @@ def scan(entry: dict):
     # the row we're accruing into. The activating turn itself isn't charged
     # (its cost is trivial; the SKILL.md context + work land on later turns).
     active_skill: dict | None = None
+    # A tool_use's error arrives later, in a separate `tool_result` block on a
+    # following `user` message, linked by id. Index rows by their tool_use id
+    # so we can stamp `is_error` + `error_signature` back onto the right row
+    # when its result lands. (#110 friction ledger.)
+    tool_rows_by_id: dict[str, dict] = {}
 
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -179,6 +185,18 @@ def scan(entry: dict):
                             saw_tool_result = True
                             if block.get("is_error"):
                                 session["tool_error_count"] += 1
+                                # Stamp the failure back onto the originating
+                                # tool_use row. `is_error` mirrors the session
+                                # error count (includes user cancels), but the
+                                # `error_signature` is only set for genuine
+                                # agent friction (the normalizer returns None
+                                # for cancel/reject), so the ledger stays clean.
+                                row = tool_rows_by_id.get(block.get("tool_use_id"))
+                                if row is not None:
+                                    row["is_error"] = 1
+                                    sig = normalize_error_signature(block.get("content"))
+                                    if sig:
+                                        row["error_signature"] = sig
                     if text_parts and not saw_tool_result:
                         text = "\n".join(text_parts)
                         prompts.append({
@@ -259,6 +277,9 @@ def scan(entry: dict):
                                 # accrue their cost into this row.
                                 row["cost_usd"] = 0.0
                                 active_skill = row
+                            block_id = block.get("id")
+                            if isinstance(block_id, str) and block_id:
+                                tool_rows_by_id[block_id] = row
                             tool_calls.append(row)
 
     session["models"] = json.dumps(sorted(models))

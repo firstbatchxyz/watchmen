@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from watchmen.adapters._shared import extract_skill_from_args
+from watchmen.adapters._shared import extract_skill_from_args, normalize_error_signature
 from watchmen.metrics import price_for_model
 
 NAME = "codex"
@@ -170,6 +170,10 @@ def scan(entry: dict):
     # until the next skill read or the next genuine user prompt. `active_skill`
     # points at the row we're accruing into.
     active_skill: dict | None = None
+    # Codex emits a tool's result in a later `function_call_output` linked to
+    # its call by `call_id`; index rows so we can stamp is_error/signature
+    # back onto the right one when the output lands. (#110 friction ledger.)
+    tool_rows_by_call: dict[str, dict] = {}
 
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -293,13 +297,38 @@ def scan(entry: dict):
                     # accrue into this row.
                     row["cost_usd"] = 0.0
                     active_skill = row
+                call_id = payload.get("call_id")
+                if isinstance(call_id, str) and call_id:
+                    tool_rows_by_call[call_id] = row
                 tool_calls.append(row)
             elif ptype in ("function_call_output", "custom_tool_call_output"):
-                # Tool result. is_error not directly exposed; some outputs carry
-                # exit_code in their JSON. Best-effort scan.
+                # Tool result. Codex serializes it as a JSON string of the form
+                # {"output": "<text>", "metadata": {"exit_code": N, ...}}. A
+                # non-zero exit_code is the failure signal; the output text (if
+                # any) feeds the error signature.
                 out = payload.get("output")
-                if isinstance(out, str) and ('"exit_code":1' in out or '"exit_code": 1' in out):
+                exit_code = None
+                out_text = ""
+                if isinstance(out, str):
+                    try:
+                        parsed = json.loads(out)
+                    except json.JSONDecodeError:
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        md = parsed.get("metadata")
+                        if isinstance(md, dict):
+                            exit_code = md.get("exit_code")
+                        out_text = parsed.get("output") or ""
+                    else:
+                        out_text = out
+                if exit_code not in (0, None):
                     session["tool_error_count"] += 1
+                    row = tool_rows_by_call.get(payload.get("call_id"))
+                    if row is not None:
+                        row["is_error"] = 1
+                        sig = normalize_error_signature(out_text)
+                        if sig:
+                            row["error_signature"] = sig
             elif ptype in ("web_search_call", "tool_search_call"):
                 session["tool_use_count"] += 1
                 tool_calls.append({

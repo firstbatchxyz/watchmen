@@ -1419,6 +1419,183 @@ def skill_effectiveness(days: int = 90, project_key: str | None = None) -> list[
     return out
 
 
+# Recency half-life (days) for the friction-ledger score. A mistake last seen
+# two weeks ago counts half as urgent as one seen today, at equal recurrence.
+_FRICTION_HALFLIFE_DAYS = 14.0
+
+
+def friction_ledger(
+    days: int = 90,
+    project_key: str | None = None,
+    weeks: int = 12,
+    limit: int = 40,
+    min_occurrences: int = 2,
+) -> dict:
+    """Recurring tool failures, grouped by normalized `error_signature` —
+    the "do I keep making the same mistake?" view (#110).
+
+    Groups errored `tool_calls` by their folded signature (see
+    `adapters/_shared.normalize_error_signature`) and ranks them by
+    *recurrence × recency*, so a frequent mistake you made today outranks an
+    equally frequent one you stopped making a month ago. Only signatures with
+    `>= min_occurrences` count (a one-off isn't a recurring mistake);
+    user-cancelled / rejected calls never get a signature, so they're absent
+    by construction.
+
+    Each entry:
+        signature        the folded error text (the grouping key)
+        occurrences      total errored calls with this signature
+        sessions         distinct sessions it occurred in
+        repos            distinct project_dirs it occurred in
+        agents           distinct agents that hit it (list)
+        top_tool         the tool that most often produced it
+        first_seen       ISO local date, first / last occurrence in window
+        last_seen
+        days_since_last  recency, in days
+        spark            weekly counts over `weeks` (oldest→newest), for a
+                         "is the curve falling?" sparkline
+        score            recurrence × recency rank key
+
+    Returns (JSON-able):
+        {
+          "generated_for": project_key | None, "days", "weeks",
+          "total_errors":     errored calls in window (incl. unsignatured),
+          "signatured":       errored calls that carry a signature,
+          "distinct":         distinct recurring signatures (>= min_occurrences),
+          "singletons":       signatures seen exactly once (reported, not listed),
+          "repos_total":      distinct repos with any signatured error,
+          "landing":          treatment day if project-scoped + in window,
+          "entries":          [ ... ranked, truncated to `limit` ... ],
+        }
+
+    Never raises; missing corpus.db → empty (all zeros)."""
+    out: dict = {
+        "generated_for": project_key, "days": days, "weeks": weeks,
+        "total_errors": 0, "signatured": 0, "distinct": 0, "singletons": 0,
+        "repos_total": 0, "landing": None, "entries": [],
+    }
+    if not CORPUS_DB.exists():
+        return out
+
+    today = date.today()
+    cutoff = (today - timedelta(days=days - 1)).isoformat()
+
+    project_dir: str | None = None
+    if project_key is not None:
+        project_dir = _project_dir_for_key(project_key)
+        if project_dir is None:
+            return out
+    proj_filter = " AND s.project_dir = ?" if project_dir else ""
+    proj_param = [project_dir] if project_dir else []
+
+    with sqlite3.connect(str(CORPUS_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        # Total errored calls (denominator) — includes unsignatured (cancels).
+        out["total_errors"] = conn.execute(
+            """SELECT COUNT(*) FROM tool_calls t JOIN sessions s
+                 ON t.session_id = s.session_id
+                WHERE t.is_error = 1 AND s.is_subagent = 0
+                  AND date(t.timestamp, 'localtime') >= ?""" + proj_filter,
+            [cutoff] + proj_param,
+        ).fetchone()[0]
+        # Every signatured errored call in the window — aggregate in Python so
+        # we can build per-signature agent sets, top-tool, and weekly sparks
+        # without three more GROUP BY round-trips. The filter (errored AND
+        # signatured) keeps this to the low thousands even on a big corpus.
+        rows = conn.execute(
+            """SELECT t.error_signature AS sig, t.session_id AS sid,
+                      s.project_dir AS repo, s.agent AS agent,
+                      t.tool_name AS tool,
+                      date(t.timestamp, 'localtime') AS d
+                 FROM tool_calls t JOIN sessions s ON t.session_id = s.session_id
+                WHERE t.is_error = 1 AND t.error_signature IS NOT NULL
+                  AND s.is_subagent = 0
+                  AND date(t.timestamp, 'localtime') >= ?""" + proj_filter,
+            [cutoff] + proj_param,
+        ).fetchall()
+
+    out["signatured"] = len(rows)
+    if not rows:
+        return out
+
+    # Weekly buckets: index 0 = oldest week, `weeks-1` = current week.
+    span_start = today - timedelta(days=weeks * 7 - 1)
+
+    def _week_idx(d_str: str) -> int | None:
+        try:
+            d = date.fromisoformat(d_str)
+        except (ValueError, TypeError):
+            return None
+        delta = (d - span_start).days
+        if delta < 0:
+            return 0  # older than the spark window → fold into the first bin
+        idx = delta // 7
+        return min(idx, weeks - 1)
+
+    groups: dict[str, dict] = {}
+    repos_all: set[str] = set()
+    for r in rows:
+        sig = r["sig"]
+        repos_all.add(r["repo"])
+        g = groups.get(sig)
+        if g is None:
+            g = groups[sig] = {
+                "occurrences": 0, "sessions": set(), "repos": set(),
+                "agents": set(), "tools": {}, "first_seen": r["d"],
+                "last_seen": r["d"], "spark": [0] * weeks,
+            }
+        g["occurrences"] += 1
+        g["sessions"].add(r["sid"])
+        g["repos"].add(r["repo"])
+        g["agents"].add(r["agent"])
+        g["tools"][r["tool"]] = g["tools"].get(r["tool"], 0) + 1
+        if r["d"] and r["d"] < g["first_seen"]:
+            g["first_seen"] = r["d"]
+        if r["d"] and r["d"] > g["last_seen"]:
+            g["last_seen"] = r["d"]
+        wi = _week_idx(r["d"])
+        if wi is not None:
+            g["spark"][wi] += 1
+
+    out["repos_total"] = len(repos_all)
+    singletons = sum(1 for g in groups.values() if g["occurrences"] < min_occurrences)
+    out["singletons"] = singletons
+
+    entries = []
+    for sig, g in groups.items():
+        if g["occurrences"] < min_occurrences:
+            continue
+        try:
+            days_since = (today - date.fromisoformat(g["last_seen"])).days
+        except (ValueError, TypeError):
+            days_since = days
+        recency = 0.5 ** (max(days_since, 0) / _FRICTION_HALFLIFE_DAYS)
+        score = g["occurrences"] * recency
+        top_tool = max(g["tools"].items(), key=lambda kv: (kv[1], kv[0]))[0]
+        entries.append({
+            "signature": sig,
+            "occurrences": g["occurrences"],
+            "sessions": len(g["sessions"]),
+            "repos": len(g["repos"]),
+            "agents": sorted(g["agents"]),
+            "top_tool": top_tool,
+            "first_seen": g["first_seen"],
+            "last_seen": g["last_seen"],
+            "days_since_last": days_since,
+            "spark": g["spark"],
+            "score": round(score, 3),
+        })
+
+    entries.sort(key=lambda e: (-e["score"], -e["occurrences"], e["signature"]))
+    out["distinct"] = len(entries)
+    out["entries"] = entries[:limit]
+    if project_key is not None:
+        landing = _treatment_day(project_key, project_dir)
+        if landing and span_start.isoformat() <= landing <= today.isoformat():
+            out["landing"] = landing
+    return out
+
+
 def activity_calendar(project_key: str, weeks: int = 26) -> list[tuple[str, int]]:
     """Per-day prompt counts for the last `weeks` weeks (Sunday-aligned).
     Returns [(date_iso, prompt_count)] in chronological order."""

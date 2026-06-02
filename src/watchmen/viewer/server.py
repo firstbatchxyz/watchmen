@@ -374,6 +374,8 @@ def project_page(request: Request, project_key: str):
         # with the "skills landed" marker). svg is "" when there's no data.
         "swimlane": swimlane,
         "swimlane_svg": _metrics.repo_swimlane_svg(swimlane),
+        # This repo's recurring mistakes (friction ledger), scoped to it.
+        "friction": _friction_with_sparks(_metrics, days=120, limit=15, project_key=project_key),
         # Subagent share + top "delegation candidate" main sessions.  Helps
         # surface the (often very large) gap between sessions that delegate
         # heavily to subagents and the monolithic ones that don't.
@@ -1201,7 +1203,21 @@ def metrics_all(request: Request, tracked: int = 0, matrix: str = "sessions"):
         "work_matrix": _metrics.work_matrix(days=card_days, tracked_only=tracked_only, metric=matrix),
         "matrix_metrics": _metrics.MATRIX_METRICS,
         "matrix_tracked": 1 if tracked_only else 0,
+        # Friction ledger: recurring tool failures grouped by signature, each
+        # with a server-rendered weekly recurrence sparkline.
+        "friction": _friction_with_sparks(_metrics, days=card_days, limit=25),
     })
+
+
+def _friction_with_sparks(_metrics, *, days: int, limit: int, project_key=None) -> dict:
+    """friction_ledger + a pre-rendered weekly sparkline per entry. Kept out of
+    the metric itself so the SVG (presentation) doesn't leak into the data API."""
+    data = _metrics.friction_ledger(days=days, limit=limit, project_key=project_key)
+    for e in data["entries"]:
+        e["spark_svg"] = _metrics.sparkline_svg(
+            e["spark"], width=96, height=22, color="#f59e0b",
+        )
+    return data
 
 
 @app.get("/p/{project_key}/metrics", response_class=HTMLResponse)

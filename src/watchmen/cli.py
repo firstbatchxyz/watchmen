@@ -102,6 +102,7 @@ from watchmen.commands.pipeline import (
 from watchmen.commands.lifecycle import cmd_down, cmd_up
 from watchmen.commands.subagents import cmd_subagents
 from watchmen.commands.skills import cmd_skills
+from watchmen.commands.mistakes import cmd_mistakes
 from watchmen.commands.goals import cmd_goals
 from watchmen.commands.distill import cmd_distill
 from watchmen.util import find_changelog as _find_changelog
@@ -1211,6 +1212,7 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("insights",   "cross-repo digest — sessions, skills, patterns, friction"),
         ("subagents",  "subagent usage and cost share per agent / project"),
         ("skills",     "per-skill usage, decay, cost + fired-vs-baseline outcomes"),
+        ("mistakes",   "recurring tool failures, ranked by recurrence × recency"),
         ("goals",      "codex goal usage and cost per project (codex 0.133.0+)"),
         ("changelog",  "render the watchmen CHANGELOG.md"),
         ("open",       "open the viewer in your browser"),
@@ -1560,6 +1562,28 @@ def build_parser() -> "WatchmenParser":
         help="emit raw rows as JSON instead of a table",
     )
     p_skills.set_defaults(func=cmd_skills)
+
+    p_mistakes = sub.add_parser(
+        "mistakes",
+        help="recurring tool failures grouped by signature, ranked by recurrence × recency",
+    )
+    p_mistakes.add_argument(
+        "--project", default=None,
+        help="scope to one project key (default: all projects)",
+    )
+    p_mistakes.add_argument(
+        "--days", type=int, default=90,
+        help="lookback window in days (default: 90)",
+    )
+    p_mistakes.add_argument(
+        "--limit", type=int, default=25,
+        help="max number of mistakes to show (default: 25)",
+    )
+    p_mistakes.add_argument(
+        "--json", action="store_true",
+        help="emit the raw ledger as JSON instead of a table",
+    )
+    p_mistakes.set_defaults(func=cmd_mistakes)
 
     p_goals = sub.add_parser(
         "goals",

@@ -750,7 +750,8 @@ def _seed_corpus_skill_eff(corpus_path: Path, sessions: list[dict], tool_calls: 
         tool_name TEXT,
         is_error INTEGER NOT NULL DEFAULT 0,
         skill_name TEXT,
-        cost_usd REAL
+        cost_usd REAL,
+        error_signature TEXT
     );
     """
     s_cols = ("session_id, project_dir, started_at, duration_seconds, "
@@ -758,14 +759,16 @@ def _seed_corpus_skill_eff(corpus_path: Path, sessions: list[dict], tool_calls: 
     with sqlite3.connect(str(corpus_path)) as conn:
         conn.executescript(schema)
         for s in sessions:
-            row = {"duration_seconds": None, "is_subagent": 0, "agent": "claude_code", **s}
+            row = {"duration_seconds": None, "is_subagent": 0, "agent": "claude_code",
+                   "cost_usd": 0.0, "tool_use_count": 0, "tool_error_count": 0, **s}
             ph = ", ".join(f":{c.strip()}" for c in s_cols.split(","))
             conn.execute(f"INSERT INTO sessions ({s_cols}) VALUES ({ph})", row)
         for t in tool_calls:
-            row = {"skill_name": None, "cost_usd": None, "is_error": 0, **t}
+            row = {"skill_name": None, "cost_usd": None, "is_error": 0,
+                   "error_signature": None, **t}
             conn.execute(
-                "INSERT INTO tool_calls (session_id, timestamp, tool_name, is_error, skill_name, cost_usd) "
-                "VALUES (:session_id, :timestamp, :tool_name, :is_error, :skill_name, :cost_usd)",
+                "INSERT INTO tool_calls (session_id, timestamp, tool_name, is_error, skill_name, cost_usd, error_signature) "
+                "VALUES (:session_id, :timestamp, :tool_name, :is_error, :skill_name, :cost_usd, :error_signature)",
                 row,
             )
 
@@ -1058,3 +1061,98 @@ def test_repo_swimlane_landing_marker_only_within_window(fresh_metrics, monkeypa
     out = fresh_metrics.repo_swimlane("kai", weeks=4, source_repo="/r/kai")
     assert out["landing"] == _days_ago(1)[:10]
     assert "skills landed" in fresh_metrics.repo_swimlane_svg(out)
+
+
+# ─── friction_ledger (#110) ──────────────────────────────────────────────
+#
+# Recurring tool failures grouped by error_signature, ranked recurrence ×
+# recency. Reuses _seed_corpus_skill_eff (its tool_calls table now carries
+# error_signature). Cross-project (project_key=None) so no STATE_DB needed.
+
+def _err(session_id, sig, days_ago, tool="Edit"):
+    return {"session_id": session_id, "timestamp": _days_ago(days_ago),
+            "tool_name": tool, "is_error": 1, "error_signature": sig}
+
+
+def test_friction_ledger_empty_when_no_corpus(fresh_metrics):
+    out = fresh_metrics.friction_ledger(days=90)
+    assert out["entries"] == [] and out["total_errors"] == 0
+
+
+def test_friction_ledger_groups_and_ranks_by_recurrence_recency(fresh_metrics):
+    sessions = [{"session_id": f"s{i}", "project_dir": "/pa", "started_at": _days_ago(2),
+                 "tool_use_count": 20, "tool_error_count": 5} for i in range(4)]
+    tools = []
+    # "stale read" — frequent AND recent → should rank first.
+    for i in range(6):
+        tools.append(_err(f"s{i % 4}", "file modified since read", 0))
+    # "not found" — same count but older → lower score.
+    for i in range(6):
+        tools.append(_err(f"s{i % 4}", "string not found", 40))
+    # a singleton — must be excluded from entries but counted.
+    tools.append(_err("s0", "one off blip", 1))
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, sessions, tools)
+
+    out = fresh_metrics.friction_ledger(days=90)
+    assert out["total_errors"] == 13
+    assert out["signatured"] == 13
+    assert out["singletons"] == 1
+    assert out["distinct"] == 2  # singleton excluded
+    sigs = [e["signature"] for e in out["entries"]]
+    assert sigs == ["file modified since read", "string not found"]  # recent wins
+    top = out["entries"][0]
+    assert top["occurrences"] == 6
+    assert top["sessions"] == 4
+    assert top["days_since_last"] == 0
+
+
+def test_friction_ledger_excludes_subagents_and_unsignatured(fresh_metrics):
+    sessions = [
+        {"session_id": "main", "project_dir": "/pa", "started_at": _days_ago(1),
+         "tool_use_count": 10, "tool_error_count": 3, "is_subagent": 0},
+        {"session_id": "sub", "project_dir": "/pa", "started_at": _days_ago(1),
+         "tool_use_count": 10, "tool_error_count": 3, "is_subagent": 1},
+    ]
+    tools = [
+        _err("main", "real mistake", 0), _err("main", "real mistake", 0),
+        # subagent error — excluded entirely.
+        _err("sub", "real mistake", 0),
+        # an errored row with NO signature (a user cancel) — counts toward
+        # total_errors but never appears as a signature.
+        {"session_id": "main", "timestamp": _days_ago(0), "tool_name": "Bash",
+         "is_error": 1, "error_signature": None},
+    ]
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, sessions, tools)
+
+    out = fresh_metrics.friction_ledger(days=90)
+    assert out["total_errors"] == 3  # 2 main signatured + 1 unsignatured; sub excluded
+    assert out["signatured"] == 2
+    assert len(out["entries"]) == 1
+    assert out["entries"][0]["occurrences"] == 2
+
+
+def test_friction_ledger_window_cutoff(fresh_metrics):
+    sessions = [{"session_id": "s", "project_dir": "/pa", "started_at": _days_ago(1),
+                 "tool_use_count": 10, "tool_error_count": 4}]
+    tools = [
+        _err("s", "recent mistake", 2), _err("s", "recent mistake", 3),
+        _err("s", "ancient mistake", 200), _err("s", "ancient mistake", 201),
+    ]
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, sessions, tools)
+
+    out = fresh_metrics.friction_ledger(days=30)
+    assert [e["signature"] for e in out["entries"]] == ["recent mistake"]
+
+
+def test_friction_ledger_weekly_spark_buckets(fresh_metrics):
+    sessions = [{"session_id": "s", "project_dir": "/pa", "started_at": _days_ago(1),
+                 "tool_use_count": 10, "tool_error_count": 5}]
+    # Two this week, one ~3 weeks ago.
+    tools = [_err("s", "m", 0), _err("s", "m", 1), _err("s", "m", 21)]
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, sessions, tools)
+
+    out = fresh_metrics.friction_ledger(days=90, weeks=8)
+    spark = out["entries"][0]["spark"]
+    assert len(spark) == 8
+    assert spark[-1] == 2          # current week
+    assert sum(spark) == 3

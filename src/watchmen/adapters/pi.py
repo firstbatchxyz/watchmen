@@ -43,7 +43,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from watchmen.adapters._shared import extract_skill_from_args, extract_skill_from_path
+from watchmen.adapters._shared import (
+    extract_skill_from_args,
+    extract_skill_from_path,
+    normalize_error_signature,
+)
 from watchmen.metrics import turn_cost_usd
 
 NAME = "pi"
@@ -168,6 +172,10 @@ def scan(entry: dict):
     # we accrue subsequent per-message cost into that skill's tool_call row
     # until the next skill read or the next genuine user prompt.
     active_skill: dict | None = None
+    # pi emits each tool result as its own `toolResult` message linked to its
+    # call by `toolCallId`; index rows so we can stamp is_error/signature back
+    # onto the right one. (#110 friction ledger.)
+    tool_rows_by_id: dict[str, dict] = {}
 
     # Pass 1: load all entries.
     by_id: dict[str, dict] = {}
@@ -319,6 +327,9 @@ def scan(entry: dict):
                         if skill_name:
                             row["cost_usd"] = 0.0
                             active_skill = row
+                        block_id = block.get("id")
+                        if isinstance(block_id, str) and block_id:
+                            tool_rows_by_id[block_id] = row
                         tool_calls.append(row)
 
         elif role == "toolResult":
@@ -326,13 +337,21 @@ def scan(entry: dict):
             # at the MESSAGE level (`message.isError`), not inside content
             # blocks — scanning blocks never matched, so tool errors went
             # uncounted. Read the message-level flag (with legacy fallbacks).
-            if msg.get("isError") or msg.get("is_error"):
+            errored = bool(msg.get("isError") or msg.get("is_error"))
+            if not errored and isinstance(content, list):
+                errored = any(
+                    isinstance(b, dict) and (b.get("isError") or b.get("is_error"))
+                    for b in content
+                )
+            if errored:
                 session["tool_error_count"] += 1
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and (block.get("isError") or block.get("is_error")):
-                        session["tool_error_count"] += 1
-                        break
+                # Link back to the call by toolCallId and stamp the signature.
+                row = tool_rows_by_id.get(msg.get("toolCallId"))
+                if row is not None:
+                    row["is_error"] = 1
+                    sig = normalize_error_signature(content)
+                    if sig:
+                        row["error_signature"] = sig
 
         elif role == "bashExecution":
             session["tool_use_count"] += 1
