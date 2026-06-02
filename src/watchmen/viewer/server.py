@@ -1220,6 +1220,35 @@ def _friction_with_sparks(_metrics, *, days: int, limit: int, project_key=None) 
     return data
 
 
+def _render_map(request: Request, project_key: str | None, scope_label: str | None):
+    """Shared body for the global and per-project intent-map routes. Catches
+    MapDepsMissing so an install without the [map] extra gets an install hint
+    instead of a 500."""
+    from watchmen import semantic
+    days = int(request.query_params.get("days", "180") or "180")
+    days = max(7, min(days, 730))
+    ctx = {"scope_label": scope_label, "deps_missing": False,
+           "data": {"points": [], "days": days, "total_prompts": 0}}
+    try:
+        ctx["data"] = semantic.intent_map(days=days, project_key=project_key)
+    except semantic.MapDepsMissing:
+        ctx["deps_missing"] = True
+    return TEMPLATES.TemplateResponse(request, "map.html", ctx)
+
+
+@app.get("/map", response_class=HTMLResponse)
+def intent_map_all(request: Request):
+    return _render_map(request, None, None)
+
+
+@app.get("/p/{project_key}/map", response_class=HTMLResponse)
+def intent_map_project(request: Request, project_key: str):
+    proj = get_project_meta(project_key)
+    if not proj:
+        raise HTTPException(404, f"project {project_key} not tracked")
+    return _render_map(request, project_key, project_key)
+
+
 @app.get("/p/{project_key}/metrics", response_class=HTMLResponse)
 def project_metrics(request: Request, project_key: str):
     from watchmen import metrics as _metrics

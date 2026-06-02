@@ -103,6 +103,9 @@ def runtime_path(name: str, *, migrate_legacy: bool = True, legacy_alias: str | 
 
 STATE_DB = runtime_path("state.db")
 CORPUS_DB = runtime_path("corpus.db")
+# Prompt-intent map cache (#111): local embedding vectors + 2D projections.
+# Rebuildable from corpus.db at any time, so it lives beside it rather than in it.
+INTENT_DB = runtime_path("intent.db")
 EVENTS_DB = runtime_path("events.db")
 EVENTS_JSONL = runtime_path("events.jsonl")
 ANALYSES_DIR = runtime_path("analyses")

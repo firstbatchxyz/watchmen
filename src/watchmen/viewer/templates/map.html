@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}prompt-intent map · watchmen{% endblock %}
+{% block content %}
+
+<div class="mb-6">
+  <h1 class="text-2xl font-semibold">Prompt-intent map{% if scope_label %} — {{ scope_label }}{% endif %}</h1>
+  <div class="text-sm text-gray-600 mt-1">
+    An <strong>exploratory</strong> view: every genuine prompt you typed, embedded with a
+    <strong>local</strong> model and laid out so similar asks sit nearby. Good for spotting
+    <em>regions</em> of work and browsing; not a precise instrument — t-SNE distances and cluster
+    shapes are approximate, so read neighbourhoods, not coordinates. The actionable signals live in
+    <a href="/metrics" class="text-blue-600 hover:underline">Metrics</a> (recurring mistakes, the work
+    matrix). Hover a point to read it; scroll to zoom, drag to pan.
+  </div>
+</div>
+
+{% if deps_missing %}
+<div class="bg-amber-50 border border-amber-200 rounded-lg p-5 text-sm text-amber-900">
+  <div class="font-semibold mb-1">The prompt-intent map needs the optional ML extra.</div>
+  <p class="mb-2">It runs a <strong>local</strong> embedding model (no data leaves your machine) plus
+  scikit-learn for the 2-D projection. They're opt-in so the core install stays lightweight.</p>
+  <pre class="bg-white border border-amber-200 rounded px-3 py-2 overflow-x-auto"><code>pip install 'watchmen[map]'</code></pre>
+  <p class="mt-2">Then build the cache once with <code>watchmen map</code> and refresh this page.</p>
+</div>
+{% elif not data.points %}
+<div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500">
+  No genuine prompts in the last {{ data.days }} days{% if scope_label %} for {{ scope_label }}{% endif %}.
+  {% if data.total_prompts == 0 %}Run <code>watchmen ingest</code> to populate the corpus.{% endif %}
+</div>
+{% else %}
+<div class="bg-white rounded-lg border border-gray-200 mb-4 p-5">
+  <div class="flex items-baseline justify-between mb-1">
+    <h2 class="text-lg font-semibold">Semantic layout</h2>
+    <span class="text-xs text-gray-500">
+      {{ "{:,}".format(data.shown) }} prompts
+      {%- if data.sampled %} (newest of {{ "{:,}".format(data.total_prompts) }}){% endif %}
+      · last {{ data.days }}d · {{ data.model.split('/')[-1] }}
+    </span>
+  </div>
+  <p class="text-xs text-gray-500 mb-3">
+    <span style="color:{{ data.colors.errored }};font-weight:600;">●</span> a tool call failed in that turn
+    ({{ data.outcomes.errored }}) ·
+    <span style="color:{{ data.colors.rephrase }};font-weight:600;">●</span> you restated the same ask
+    ({{ data.outcomes.rephrase }}) ·
+    <span style="color:{{ data.colors.clean }};font-weight:600;">●</span> clean ({{ data.outcomes.clean }}).
+    Colours describe what co-occurred with a prompt — association, not causation.
+  </p>
+  <div class="wm-chart" data-wm-chart="scatter" style="height: 560px;"
+       data-points='{{ data|tojson }}'></div>
+</div>
+<p class="text-xs text-gray-400">
+  Layout is t-SNE over local embeddings; distances are relative, axes are unitless. The same
+  prompt set reuses a cached projection — <code>watchmen map{% if data.generated_for %} --project {{ data.generated_for }}{% endif %} --rebuild</code> forces a fresh one.
+</p>
+{% endif %}
+
+{% endblock %}

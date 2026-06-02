@@ -1370,6 +1370,7 @@
         <a href="/"         class="wm-nav-link text-sm {% if path == '/' %}is-active{% endif %}">Dashboard</a>
         <a href="/insights" class="wm-nav-link text-sm {% if path.startswith('/insights') %}is-active{% endif %}">Insights</a>
         <a href="/metrics"  class="wm-nav-link text-sm {% if path.startswith('/metrics') %}is-active{% endif %}">Metrics</a>
+        <a href="/map"      class="wm-nav-link text-sm {% if path.startswith('/map') %}is-active{% endif %}">Map</a>
         <a href="/runs"     class="wm-nav-link text-sm {% if path.startswith('/runs') %}is-active{% endif %}">Runs</a>
         <a href="/doctor"   class="wm-nav-link text-sm {% if path.startswith('/doctor') %}is-active{% endif %}">Doctor</a>
         <a href="/settings" class="wm-nav-link text-sm {% if path.startswith('/settings') %}is-active{% endif %}">Settings</a>
@@ -1888,6 +1889,74 @@
         attachResize(chart, el);
       };
 
+      // Prompt-intent map (#111): a 2D semantic scatter. This is the one
+      // view where interactivity earns its keep — pan/zoom to explore regions,
+      // hover to read the prompt. Canvas renderer (not SVG) because a few
+      // thousand points would choke SVG. Colour = turn outcome.
+      window.wmMountScatterChart = function (el) {
+        if (!window.echarts || !el || el.__wmChart) return;
+        let data;
+        try { data = JSON.parse(el.dataset.points || '{}'); }
+        catch { data = {}; }
+        const points = data.points || [];
+        if (!points.length) {
+          el.innerHTML = '<div class="wm-chart__empty">No prompts in this window.</div>';
+          return;
+        }
+        const colors = data.colors || { errored: '#dc2626', rephrase: '#f59e0b', clean: '#3b82f6' };
+        const labels = { errored: 'errored turn', rephrase: 'rephrase', clean: 'clean' };
+
+        const chart = echarts.init(el, null, { renderer: 'canvas' });
+        el.__wmChart = chart;
+
+        // One series per outcome so the legend toggles them and each gets its
+        // colour. Point value = [x, y, text, repo, date].
+        const series = Object.keys(colors).map((oc) => ({
+          name: labels[oc] || oc,
+          type: 'scatter',
+          symbolSize: 7,
+          large: true,
+          largeThreshold: 1000,
+          itemStyle: { color: colors[oc], opacity: 0.62 },
+          data: points.filter(p => p.outcome === oc).map(p => [p.x, p.y, p.text, p.repo, p.date]),
+        }));
+
+        chart.setOption({
+          animation: false,
+          textStyle: { fontFamily: 'inherit' },
+          legend: {
+            top: 0, right: 0, textStyle: { color: TEXT_FG, fontSize: 12 },
+            itemWidth: 10, itemHeight: 10,
+          },
+          grid: { left: 8, right: 8, top: 30, bottom: 8, containLabel: false },
+          tooltip: {
+            trigger: 'item',
+            backgroundColor: CARD_BG, borderColor: GRID_LINE, borderWidth: 1,
+            textStyle: { color: TEXT_FG, fontSize: 12 },
+            extraCssText: 'max-width:340px;white-space:normal;box-shadow:0 2px 8px rgba(0,0,0,0.08);',
+            formatter: (p) => {
+              const v = p.value;
+              const esc = (s) => String(s == null ? '' : s)
+                .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+              return `<div style="font-weight:600;margin-bottom:4px;">${p.seriesName}</div>`
+                + `<div>${esc(v[2])}</div>`
+                + `<div style="color:hsl(220,9%,46%);margin-top:4px;font-size:11px;">`
+                + `${esc(v[3])} · ${esc(v[4])}</div>`;
+            },
+          },
+          // Semantic coordinates are unitless; hide axes (a t-SNE axis means
+          // nothing) but keep zoom/pan via the inside dataZoom on both axes.
+          xAxis: { show: false, scale: true },
+          yAxis: { show: false, scale: true },
+          dataZoom: [
+            { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
+            { type: 'inside', yAxisIndex: 0, filterMode: 'none' },
+          ],
+          series,
+        });
+        attachResize(chart, el);
+      };
+
       // ── Dispatch ──────────────────────────────────────────────────────
       const MOUNTERS = {
         area:     window.wmMountAreaChart,
@@ -1896,6 +1965,7 @@
         radar:    window.wmMountRadarChart,
         calendar: window.wmMountCalendarChart,
         hourdow:  window.wmMountHourDowChart,
+        scatter:  window.wmMountScatterChart,
       };
 
       function mountAll() {
