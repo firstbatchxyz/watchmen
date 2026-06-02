@@ -299,6 +299,53 @@
 </section>
 {% endif %}
 
+{% if friction and friction.entries %}
+<section class="wm-friction mb-8">
+  <div class="stat-card">
+    <h2 class="wm-cmp__title">Recurring mistakes</h2>
+    <p class="wm-cmp__sub">
+      Tool failures over the last {{ friction.days }} days, grouped by what went
+      wrong and ranked by how often &amp; how recently they recur. The same
+      mistake in different words folds into one row.
+      <strong>{{ friction.distinct }}</strong> recurring
+      {{ 'mistake' if friction.distinct == 1 else 'mistakes' }} across
+      {{ friction.signatured }} failures
+      {% if friction.singletons %}({{ friction.singletons }} one-offs not shown){% endif %}.
+    </p>
+    <div class="wm-friction__scroll">
+      <table class="wm-friction__table">
+        <thead>
+          <tr>
+            <th class="l">mistake</th>
+            <th>trend</th>
+            <th>times</th>
+            <th>sessions</th>
+            <th>repos</th>
+            <th>last</th>
+            <th class="l">top tool</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for e in friction.entries %}
+          <tr>
+            <td class="l wm-friction__sig">
+              <code>{{ e.signature }}</code>
+            </td>
+            <td class="wm-friction__spark">{{ e.spark_svg|safe }}</td>
+            <td class="wm-friction__n">{{ e.occurrences }}</td>
+            <td>{{ e.sessions }}</td>
+            <td>{{ e.repos }}</td>
+            <td class="wm-friction__age">{% if e.days_since_last == 0 %}today{% else %}{{ e.days_since_last }}d ago{% endif %}</td>
+            <td class="l"><code>{{ e.top_tool }}</code></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endif %}
+
 <style>
   /* `.stat-card` baseline lives in base.html now. Only daily-table styles
      stay local since they're unique to this page. */
@@ -318,6 +365,17 @@
   .wm-matrix__err { display: block; font-size: 11px; color: hsl(var(--muted-foreground)); }
   .wm-matrix__err.is-hot { color: hsl(0, 84%, 60%); font-weight: 600; }
   .wm-matrix__total, .wm-matrix__total-h { text-align: right !important; padding: 6px 12px !important; font-variant-numeric: tabular-nums; }
+  .wm-friction__scroll { overflow-x: auto; margin-top: 12px; }
+  table.wm-friction__table { border-collapse: collapse; font-size: 13px; width: 100%; }
+  .wm-friction__table th { text-align: right; padding: 6px 12px; font-weight: 500; color: hsl(var(--muted-foreground)); border-bottom: 1px solid hsl(var(--border)); white-space: nowrap; }
+  .wm-friction__table th.l, .wm-friction__table td.l { text-align: left; }
+  .wm-friction__table td { text-align: right; padding: 6px 12px; border-bottom: 1px solid hsl(var(--border)); font-variant-numeric: tabular-nums; vertical-align: middle; }
+  .wm-friction__sig { max-width: 460px; }
+  .wm-friction__sig code { font-size: 12px; color: hsl(var(--foreground)); white-space: normal; word-break: break-word; }
+  .wm-friction__n { font-weight: 600; color: hsl(var(--foreground)); }
+  .wm-friction__age { color: hsl(var(--muted-foreground)); white-space: nowrap; }
+  .wm-friction__spark { padding: 2px 12px !important; }
+  .wm-friction__spark svg { display: block; }
   table.daily { font-size: 13px; }
   table.daily th { text-align: right; padding: 6px 10px; font-weight: 500; color: hsl(var(--muted-foreground)); background: hsl(var(--muted)); border-bottom: 1px solid hsl(var(--border)); }
   table.daily td { text-align: right; padding: 6px 10px; border-bottom: 1px solid hsl(var(--border)); font-variant-numeric: tabular-nums; }

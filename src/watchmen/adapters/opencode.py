@@ -35,6 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from watchmen.adapters._shared import normalize_error_signature
+
 NAME = "opencode"
 
 DB_PATH = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
@@ -230,13 +232,20 @@ def scan(entry: dict):
                     session["tool_use_count"] += 1
                     state = part.get("state") or {}
                     is_error = 1 if state.get("status") == "error" else 0
+                    error_sig = None
                     if is_error:
                         session["tool_error_count"] += 1
+                        # opencode keeps the failure message on the state; fold
+                        # it into a signature for the friction ledger (#110).
+                        error_sig = normalize_error_signature(
+                            state.get("error") or state.get("output")
+                        )
                     skill_name = _skill_slug(state) if part.get("tool") == "skill" else None
                     tc = {
                         "session_id": sid, "timestamp": ts_iso,
                         "tool_name": part.get("tool") or "?",
                         "is_error": is_error, "skill_name": skill_name,
+                        "error_signature": error_sig,
                     }
                     if skill_name:
                         tc["cost_usd"] = 0.0

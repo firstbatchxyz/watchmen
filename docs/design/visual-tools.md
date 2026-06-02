@@ -42,9 +42,9 @@ words" for grouping.
 2. **Project swimlane** — sessions over time per repo, coloured by agent, with
    skill-landing markers. *(next)*
 3. **`tool_calls.error_signature` + friction ledger** — recurring mistakes,
-   ranked by recurrence × recency, with a `⚠ no skill` flag feeding the curator
-   and prune-on-evidence. Thin `watchmen mistakes` CLI (the one spatial view
-   that's also glanceable in a terminal).
+   ranked by recurrence × recency. Thin `watchmen mistakes` CLI (the one view
+   that's also glanceable in a terminal). *(SHIPPED — the `⚠ no skill` flag is
+   deferred to step 4, which can map a mistake to a skill semantically.)*
 4. **Local embeddings** → dedup error signatures, then the **prompt-intent map**
    (the one justified spatial scatter; needs the interactivity build decision).
 5. `tool_calls.tool_target` + file-level edit-thrash — only if the coarse
@@ -96,17 +96,41 @@ card above (no duplication).
   cell shade = sessions · ● = a curated skill fired · │ = skills landed
 ```
 
-### 3. Friction ledger (Tier 1)
+### 3. Friction ledger (Tier 1) — SHIPPED
 
-> *Do I keep making the same mistake — and did a skill ever stop it?*
+> *Do I keep making the same mistake?*
 
-Group `tool_calls` where `is_error` by `error_signature`; per signature: a
-weekly-frequency sparkline (reuse `metrics.sparkline_svg`), occurrences,
-sessions, repos, recency. Overlay the skill-landing marker — does the curve
-fall after? Severity is **labelled proxies only** (`turns-to-recover`,
-amortized session-cost-share), never a fake per-error dollar figure (the
-`cost_usd` column lives on skill rows, not error rows). A recurring signature
-with no covering skill → `⚠` → curator candidate.
+`metrics.friction_ledger(days, project_key, weeks, limit)` groups errored
+`tool_calls` by `error_signature` and ranks by **recurrence × recency**
+(14-day half-life). Per signature: a weekly recurrence sparkline (server SVG,
+`metrics.sparkline_svg`), occurrences, sessions, repos, top tool, recency.
+On `/metrics` (global) and `/p/{key}` (scoped, with the skill-landing date in
+the caption so you can read whether the curve fell after). Also a terminal
+view, `watchmen mistakes` — the one ledger that's glanceable in a shell.
+
+Two facts shaped the capture layer (the schema add was the trivial part):
+
+- `tool_calls.is_error` was **0 on every row** — errors only lived as a
+  session counter, never linked to the failing call. The adapters now link
+  the result back to its `tool_use`/`call`/`toolCallId` and capture the text.
+- The normalizer (`adapters/_shared.normalize_error_signature`) folds
+  paths/numbers/hashes/quotes to placeholders, drops a leading `Exit code N`
+  line, uses the exception line of a Python traceback / the last error-looking
+  line of multi-line shell output, canonicalizes a couple of high-value
+  classes (denied bash, blocked-sleep), and returns None for user
+  cancel/reject (~15% of errored results — not agent friction) and for
+  pure-punctuation noise.
+
+Severity stays **labelled proxies only** (recurrence, recency, sessions,
+repos) — never a fake per-error dollar figure (`cost_usd` lives on skill
+rows, not error rows).
+
+**Deferred to step 4:** the `⚠ no covering skill` flag. The honest version of
+"is this mistake covered?" is a *semantic* match between the signature and a
+skill's `when_to_use` — which needs the local embeddings of step 4. The
+cheap proxy ("no skill fired in any session where it occurred") over-claims,
+so the flag is intentionally absent until embeddings can do it properly. The
+ledger feeds curator / prune-on-evidence once that lands.
 
 Companion (Tier 0, no schema change): **rephrase loops** — two adjacent user
 prompts with zero tool calls between them, per session. High rephrase + high

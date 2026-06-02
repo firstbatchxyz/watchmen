@@ -83,7 +83,14 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     -- cost is computed in the adapter loop anyway; we accrue it into the
     -- active skill instead of discarding it. NULL on non-skill rows.
     -- Enables cost-ranked skill suggestions (#95) without a per-turn table.
-    cost_usd REAL
+    cost_usd REAL,
+    -- `error_signature` is populated only on rows where `is_error = 1`: a
+    -- normalized, grouping-friendly fingerprint of the tool's error text
+    -- (paths/digits/hex/quotes folded out; see adapters/_shared.py
+    -- `normalize_error_signature`). NULL on successful and on
+    -- user-cancelled/rejected rows. Powers the friction ledger — "do I keep
+    -- making the same mistake?" — grouped by this column.
+    error_signature TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool_name);
@@ -170,6 +177,10 @@ def _migrate_tool_calls_columns(conn: sqlite3.Connection) -> None:
         sessions weren't scanned for the input.skill payload.
       - `cost_usd` added for per-skill cost attribution (#94). NULL on
         existing rows until the next scan re-ingests them.
+      - `error_signature` added for the friction ledger (#110). Populated
+        only on errored rows; existing rows stay NULL until a `--full`
+        re-ingest re-parses transcripts (incremental scans skip unchanged
+        files, so the backfill rides along with the next forced rescan).
     """
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tool_calls)").fetchall()}
     if "skill_name" not in cols:
@@ -179,6 +190,11 @@ def _migrate_tool_calls_columns(conn: sqlite3.Connection) -> None:
         )
     if "cost_usd" not in cols:
         conn.execute("ALTER TABLE tool_calls ADD COLUMN cost_usd REAL")
+    if "error_signature" not in cols:
+        conn.execute("ALTER TABLE tool_calls ADD COLUMN error_signature TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tool_calls_errsig ON tool_calls(error_signature)"
+        )
 
 
 _ENSURE_GOALS_TABLE = """
@@ -327,13 +343,15 @@ def _replace_session(conn: sqlite3.Connection, session: dict, prompts: list, too
             prompts,
         )
     if tools:
-        # Only adapters that attribute per-skill cost set `cost_usd`; default
-        # the rest to NULL so the named-param insert doesn't trip on the key.
+        # Only some adapters set `cost_usd` (per-skill cost) or
+        # `error_signature` (errored rows); default the rest to NULL so the
+        # named-param insert doesn't trip on a missing key.
         for t in tools:
             t.setdefault("cost_usd", None)
+            t.setdefault("error_signature", None)
         conn.executemany(
-            """INSERT INTO tool_calls (session_id, timestamp, tool_name, is_error, skill_name, cost_usd)
-               VALUES (:session_id, :timestamp, :tool_name, :is_error, :skill_name, :cost_usd)""",
+            """INSERT INTO tool_calls (session_id, timestamp, tool_name, is_error, skill_name, cost_usd, error_signature)
+               VALUES (:session_id, :timestamp, :tool_name, :is_error, :skill_name, :cost_usd, :error_signature)""",
             tools,
         )
 

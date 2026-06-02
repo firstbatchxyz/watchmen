@@ -157,6 +157,50 @@
 </section>
 {% endif %}
 
+{% if friction and friction.entries %}
+<section class="bg-white rounded-lg border border-gray-200 mb-8 p-5">
+  <div class="flex items-baseline justify-between mb-1">
+    <h2 class="text-lg font-semibold">Recurring mistakes</h2>
+    <span class="text-xs text-gray-500">
+      {{ friction.distinct }} recurring · {{ friction.signatured }} failures · last {{ friction.days }}d
+    </span>
+  </div>
+  <p class="text-xs text-gray-500 mb-3">
+    Tool failures grouped by what went wrong, ranked by how often &amp; how recently they recur.
+    {% if friction.landing %}The trend reaches back across when skills landed
+    ({{ friction.landing }}) so you can see if a curve fell after.{% endif %}
+  </p>
+  <div style="overflow-x:auto;">
+    <table class="w-full text-sm" style="border-collapse:collapse;">
+      <thead>
+        <tr class="text-gray-500 text-xs">
+          <th class="text-left font-medium py-1.5 pr-3 border-b border-gray-200">mistake</th>
+          <th class="text-center font-medium py-1.5 px-2 border-b border-gray-200">trend</th>
+          <th class="text-right font-medium py-1.5 px-2 border-b border-gray-200">times</th>
+          <th class="text-right font-medium py-1.5 px-2 border-b border-gray-200">sessions</th>
+          <th class="text-right font-medium py-1.5 px-2 border-b border-gray-200">last</th>
+          <th class="text-left font-medium py-1.5 pl-2 border-b border-gray-200">top tool</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in friction.entries %}
+        <tr class="border-b border-gray-100">
+          <td class="py-1.5 pr-3" style="max-width:440px;">
+            <code class="text-xs text-gray-800" style="white-space:normal;word-break:break-word;">{{ e.signature }}</code>
+          </td>
+          <td class="px-2 align-middle">{{ e.spark_svg|safe }}</td>
+          <td class="text-right px-2 font-semibold tabular-nums">{{ e.occurrences }}</td>
+          <td class="text-right px-2 tabular-nums">{{ e.sessions }}</td>
+          <td class="text-right px-2 text-gray-500 whitespace-nowrap">{% if e.days_since_last == 0 %}today{% else %}{{ e.days_since_last }}d ago{% endif %}</td>
+          <td class="pl-2"><code class="text-xs text-gray-600">{{ e.top_tool }}</code></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
 {% if subagent_metrics and subagent_metrics.has_data %}
 <section class="bg-white rounded-lg border border-gray-200 mb-8 p-5">
   <div class="flex items-baseline justify-between mb-3">
