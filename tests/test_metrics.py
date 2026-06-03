@@ -1156,3 +1156,39 @@ def test_friction_ledger_weekly_spark_buckets(fresh_metrics):
     assert len(spark) == 8
     assert spark[-1] == 2          # current week
     assert sum(spark) == 3
+
+
+def test_project_scoped_metrics_roll_up_subfolder_sessions(fresh_metrics, monkeypatch, tmp_path):
+    """A session opened from a SUBFOLDER of the tracked repo must count toward
+    the project's metrics — consistent with the shared repo_dir_sql_predicate
+    (#93) the rest of the app uses — while a prefix-sibling dir must NOT match.
+    Guards the rollup-consistency fix so project pages stop undercounting."""
+    state_db = tmp_path / "state.db"
+    with sqlite3.connect(str(state_db)) as conn:
+        conn.execute("CREATE TABLE projects (project_key TEXT PRIMARY KEY, source_repo TEXT NOT NULL)")
+        conn.execute("INSERT INTO projects VALUES ('app', '/r/app')")
+    monkeypatch.setattr(fresh_metrics, "STATE_DB", state_db)
+
+    sessions = [
+        {"session_id": "root", "project_dir": "/r/app", "started_at": _days_ago(2),
+         "tool_use_count": 5, "tool_error_count": 1},
+        {"session_id": "sub", "project_dir": "/r/app/packages/api", "started_at": _days_ago(2),
+         "tool_use_count": 5, "tool_error_count": 1},
+        {"session_id": "sibling", "project_dir": "/r/app-other", "started_at": _days_ago(2),
+         "tool_use_count": 5, "tool_error_count": 1},
+    ]
+    tools = [
+        _err("root", "same mistake", 1),
+        _err("sub", "same mistake", 1),      # subfolder → rolls up
+        _err("sibling", "same mistake", 1),  # prefix sibling → excluded
+    ]
+    _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, sessions, tools)
+
+    fr = fresh_metrics.friction_ledger(days=90, project_key="app")
+    assert fr["entries"][0]["occurrences"] == 2   # root + sub, not the sibling
+    assert fr["entries"][0]["sessions"] == 2
+
+    # skill_effectiveness is project-scoped through the same helper — it must
+    # roll up the subfolder session's data without error.
+    eff = fresh_metrics.skill_effectiveness(days=90, project_key="app")
+    assert isinstance(eff, list)
