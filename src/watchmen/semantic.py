@@ -30,7 +30,7 @@ import sqlite3
 import struct
 from datetime import date, timedelta
 
-from watchmen.paths import CORPUS_DB, INTENT_DB, STATE_DB
+from watchmen.paths import CORPUS_DB, INTENT_DB, STATE_DB, repo_dir_sql_predicate
 
 # Default local model. potion-base-8M is the small/fast tier; the 32M tier
 # trades ~4× size for sharper neighbourhoods. Kept here so the CLI/tests can
@@ -361,8 +361,16 @@ def intent_map(
 
     today = date.today()
     cutoff = (today - timedelta(days=days - 1)).isoformat()
-    proj_filter = " AND s.project_dir = ?" if project_dir else ""
-    params = [cutoff] + ([project_dir] if project_dir else [])
+    # Roll up subfolder sessions via the shared predicate (#93), consistent
+    # with metrics.py — exact-matching the repo root would drop prompts from
+    # sessions opened in a subdirectory.
+    if project_dir:
+        repo_where, repo_params = repo_dir_sql_predicate(project_dir, "s")
+        proj_filter = " AND " + repo_where
+        params = [cutoff, *repo_params]
+    else:
+        proj_filter = ""
+        params = [cutoff]
 
     with sqlite3.connect(str(CORPUS_DB)) as conn:
         conn.row_factory = sqlite3.Row
