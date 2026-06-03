@@ -724,6 +724,15 @@ def _days_ago(n: int) -> str:
     return f"{(_date.today() - timedelta(days=n)).isoformat()}T12:00:00"
 
 
+def _np(posix_path: str) -> str:
+    """POSIX-style test path → the running OS's native separators, so it
+    round-trips through repo_dir_sql_predicate's Path() normalization on Windows
+    too (project-scoped metrics normalize source_repo; raw POSIX fixtures would
+    otherwise never match on Windows). Mirrors tests/test_subfolder_rollup.py."""
+    import os
+    return posix_path.replace("/", os.sep)
+
+
 def _seed_corpus_skill_eff(corpus_path: Path, sessions: list[dict], tool_calls: list[dict]) -> None:
     """sessions + a tool_calls table with skill_name/cost_usd/timestamp, the
     exact surface skill_effectiveness joins over."""
@@ -853,20 +862,20 @@ def test_skill_effectiveness_project_filter_scopes_baseline(fresh_metrics, monke
     state_db = tmp_path / "state.db"
     with sqlite3.connect(str(state_db)) as conn:
         conn.execute("CREATE TABLE projects (project_key TEXT PRIMARY KEY, source_repo TEXT NOT NULL)")
-        conn.execute("INSERT INTO projects VALUES ('pa', '/pa')")
+        conn.execute("INSERT INTO projects VALUES ('pa', ?)", (_np("/pa"),))
     monkeypatch.setattr(fresh_metrics, "STATE_DB", state_db)
 
     sessions = []
     # project /pa: deploy fires in 3, 3 baseline
     for i in range(3):
-        sessions.append({"session_id": f"af{i}", "project_dir": "/pa", "started_at": _days_ago(4),
+        sessions.append({"session_id": f"af{i}", "project_dir": _np("/pa"), "started_at": _days_ago(4),
                          "tool_use_count": 10, "tool_error_count": 1, "cost_usd": 0.5})
     for i in range(3):
-        sessions.append({"session_id": f"ab{i}", "project_dir": "/pa", "started_at": _days_ago(4),
+        sessions.append({"session_id": f"ab{i}", "project_dir": _np("/pa"), "started_at": _days_ago(4),
                          "tool_use_count": 10, "tool_error_count": 4, "cost_usd": 1.0})
     # project /pb: a different skill fires — must be excluded by the filter
     for i in range(3):
-        sessions.append({"session_id": f"bf{i}", "project_dir": "/pb", "started_at": _days_ago(4),
+        sessions.append({"session_id": f"bf{i}", "project_dir": _np("/pb"), "started_at": _days_ago(4),
                          "tool_use_count": 10, "tool_error_count": 1, "cost_usd": 0.5})
     tool_calls = [{"session_id": f"af{i}", "timestamp": _days_ago(4), "tool_name": "Skill",
                    "skill_name": "deploy"} for i in range(3)]
@@ -996,21 +1005,21 @@ def test_repo_swimlane_empty_when_no_corpus(fresh_metrics):
 
 def test_repo_swimlane_buckets_by_day_and_agent(fresh_metrics):
     rows = [
-        {"session_id": "a1", "project_dir": "/r/kai", "started_at": _days_ago(2),
+        {"session_id": "a1", "project_dir": _np("/r/kai"), "started_at": _days_ago(2),
          "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 0.5, "agent": "claude_code"},
-        {"session_id": "a2", "project_dir": "/r/kai", "started_at": _days_ago(2),
+        {"session_id": "a2", "project_dir": _np("/r/kai"), "started_at": _days_ago(2),
          "tool_use_count": 5, "tool_error_count": 1, "cost_usd": 0.5, "agent": "claude_code"},
-        {"session_id": "c1", "project_dir": "/r/kai", "started_at": _days_ago(1),
+        {"session_id": "c1", "project_dir": _np("/r/kai"), "started_at": _days_ago(1),
          "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 0.3, "agent": "codex"},
         # other repo must be excluded; subagent must be excluded
         {"session_id": "x1", "project_dir": "/r/other", "started_at": _days_ago(1),
          "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 0.3, "agent": "codex"},
-        {"session_id": "sub", "project_dir": "/r/kai", "started_at": _days_ago(1),
+        {"session_id": "sub", "project_dir": _np("/r/kai"), "started_at": _days_ago(1),
          "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 9.0, "agent": "claude_code",
          "is_subagent": 1},
     ]
     _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, rows, [])
-    out = fresh_metrics.repo_swimlane("kai", weeks=4, source_repo="/r/kai")
+    out = fresh_metrics.repo_swimlane("kai", weeks=4, source_repo=_np("/r/kai"))
 
     assert out["total_sessions"] == 3          # subagent + other repo excluded
     assert out["agents"] == ["claude_code", "codex"]  # busiest lane first
@@ -1028,9 +1037,9 @@ def test_repo_swimlane_skill_fire_overlay(fresh_metrics):
     """Days a curated skill fired get a per-(agent, day) count + an amber dot
     overlay, keyed by the session's start day so it aligns with the lane."""
     rows = [
-        {"session_id": "a1", "project_dir": "/r/kai", "started_at": _days_ago(2),
+        {"session_id": "a1", "project_dir": _np("/r/kai"), "started_at": _days_ago(2),
          "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 0.5, "agent": "claude_code"},
-        {"session_id": "a2", "project_dir": "/r/kai", "started_at": _days_ago(1),
+        {"session_id": "a2", "project_dir": _np("/r/kai"), "started_at": _days_ago(1),
          "tool_use_count": 5, "tool_error_count": 0, "cost_usd": 0.5, "agent": "claude_code"},
     ]
     tool_calls = [
@@ -1040,7 +1049,7 @@ def test_repo_swimlane_skill_fire_overlay(fresh_metrics):
         {"session_id": "a2", "timestamp": _days_ago(1), "tool_name": "Bash"},  # not a skill
     ]
     _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, rows, tool_calls)
-    out = fresh_metrics.repo_swimlane("kai", weeks=4, source_repo="/r/kai")
+    out = fresh_metrics.repo_swimlane("kai", weeks=4, source_repo=_np("/r/kai"))
     assert out["total_skill_fires"] == 2
     assert out["lanes"]["claude_code"][_days_ago(2)[:10]]["skill_fires"] == 2
     assert out["lanes"]["claude_code"][_days_ago(1)[:10]]["skill_fires"] == 0
@@ -1055,10 +1064,10 @@ def test_repo_swimlane_landing_marker_only_within_window(fresh_metrics, monkeypa
         # a curator run 1 day ago → inside a 4-week window
         conn.execute("INSERT INTO runs VALUES ('kai','curator','ok',?)", (_days_ago(1),))
     monkeypatch.setattr(fresh_metrics, "STATE_DB", state_db)
-    rows = [{"session_id": "a1", "project_dir": "/r/kai", "started_at": _days_ago(2),
+    rows = [{"session_id": "a1", "project_dir": _np("/r/kai"), "started_at": _days_ago(2),
              "tool_use_count": 1, "tool_error_count": 0, "cost_usd": 0.1, "agent": "claude_code"}]
     _seed_corpus_skill_eff(fresh_metrics.CORPUS_DB, rows, [])
-    out = fresh_metrics.repo_swimlane("kai", weeks=4, source_repo="/r/kai")
+    out = fresh_metrics.repo_swimlane("kai", weeks=4, source_repo=_np("/r/kai"))
     assert out["landing"] == _days_ago(1)[:10]
     assert "skills landed" in fresh_metrics.repo_swimlane_svg(out)
 
@@ -1166,15 +1175,15 @@ def test_project_scoped_metrics_roll_up_subfolder_sessions(fresh_metrics, monkey
     state_db = tmp_path / "state.db"
     with sqlite3.connect(str(state_db)) as conn:
         conn.execute("CREATE TABLE projects (project_key TEXT PRIMARY KEY, source_repo TEXT NOT NULL)")
-        conn.execute("INSERT INTO projects VALUES ('app', '/r/app')")
+        conn.execute("INSERT INTO projects VALUES ('app', ?)", (_np("/r/app"),))
     monkeypatch.setattr(fresh_metrics, "STATE_DB", state_db)
 
     sessions = [
-        {"session_id": "root", "project_dir": "/r/app", "started_at": _days_ago(2),
+        {"session_id": "root", "project_dir": _np("/r/app"), "started_at": _days_ago(2),
          "tool_use_count": 5, "tool_error_count": 1},
-        {"session_id": "sub", "project_dir": "/r/app/packages/api", "started_at": _days_ago(2),
+        {"session_id": "sub", "project_dir": _np("/r/app/packages/api"), "started_at": _days_ago(2),
          "tool_use_count": 5, "tool_error_count": 1},
-        {"session_id": "sibling", "project_dir": "/r/app-other", "started_at": _days_ago(2),
+        {"session_id": "sibling", "project_dir": _np("/r/app-other"), "started_at": _days_ago(2),
          "tool_use_count": 5, "tool_error_count": 1},
     ]
     tools = [
