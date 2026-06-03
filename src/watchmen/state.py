@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from watchmen.corpus_filters import substantive_filter
-from watchmen.paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR, STATE_DB
+from watchmen.paths import ANALYSES_DIR, CORPUS_DB, BUNDLES_DIR, STATE_DB, repo_dir_sql_predicate
 
 ROOT = Path(__file__).parent
 
@@ -238,15 +238,13 @@ def get_project_progress(project_key: str) -> dict:
     }
 
 
-def _project_dir_predicate(source_repo: str, alias: str = "s") -> tuple[str, tuple[str, str]]:
-    """SQL predicate for sessions inside a tracked repo root.
+def _project_dir_predicate(source_repo: str, alias: str = "s") -> tuple[str, tuple[str | int, ...]]:
+    """SQL predicate for sessions inside a tracked repo root (incl. subfolders).
 
-    Exact equality handles normal adapter cwd storage; the child path match
-    covers sessions opened from a subdirectory without admitting arbitrary
-    substring collisions such as `kai` matching every Kai-related checkout.
+    Delegates to the shared, separator-agnostic helper so subfolder rollup works
+    the same on POSIX and Windows.
     """
-    root = str(Path(source_repo).expanduser())
-    return f"({alias}.project_dir = ? OR {alias}.project_dir LIKE ?)", (root, root.rstrip("/") + "/%")
+    return repo_dir_sql_predicate(source_repo, alias)
 
 
 def sync_from_disk(project_key: str) -> dict:

@@ -22,7 +22,7 @@ import httpx
 
 from watchmen.agent import chat_call
 from watchmen.corpus_filters import substantive_filter
-from watchmen.paths import ANALYSES_DIR, CORPUS_DB
+from watchmen.paths import ANALYSES_DIR, CORPUS_DB, repo_dir_sql_predicate
 
 ROOT = Path(__file__).parent
 
@@ -53,9 +53,9 @@ def _tracked_source_repo(project_key: str | None) -> str | None:
         return None
 
 
-def _project_dir_predicate(source_repo: str, alias: str = "s") -> tuple[str, tuple[str, str]]:
-    root = str(Path(source_repo).expanduser())
-    return f"({alias}.project_dir = ? OR {alias}.project_dir LIKE ?)", (root, root.rstrip("/") + "/%")
+def _project_dir_predicate(source_repo: str, alias: str = "s") -> tuple[str, tuple[str | int, ...]]:
+    # Subfolder rollup + cross-platform separators live in one place now.
+    return repo_dir_sql_predicate(source_repo, alias)
 
 
 def tool_list_activity_on(date: str, project_substr: str | None = None):

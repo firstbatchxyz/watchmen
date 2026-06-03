@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
-from watchmen.paths import CORPUS_DB, STATE_DB
+from watchmen.paths import CORPUS_DB, STATE_DB, repo_dir_sql_predicate
 from watchmen.model_prices import price_for_model as price_for_model_from_api, turn_cost_usd as turn_cost_usd_from_api
 
 ROOT = Path(__file__).parent
@@ -140,6 +140,22 @@ def _project_dir_for_key(project_key: str) -> str | None:
     return row[0]
 
 
+def _project_dir_filter(project_dir: str | None, alias: str = "s") -> tuple[str, list]:
+    """Build an ' AND <predicate>' clause + params selecting a project's
+    sessions INCLUDING those opened from a subfolder, from a resolved
+    source_repo. Returns ('', []) when project_dir is None.
+
+    Routes through the shared `repo_dir_sql_predicate` (#93) so every
+    project-scoped metric rolls up subfolder sessions exactly like
+    analyze/state/util/route do — instead of exact-matching the repo root and
+    silently dropping sessions opened from a subdirectory (which left project
+    pages' metrics inconsistent with the rest of the page)."""
+    if not project_dir:
+        return "", []
+    where, params = repo_dir_sql_predicate(project_dir, alias)
+    return " AND " + where, list(params)
+
+
 def _local_date(iso_ts: str | None) -> str | None:
     if not iso_ts:
         return None
@@ -159,15 +175,16 @@ def daily_metrics(project_key: str, days: int = 30) -> list[dict]:
         return []
 
     # 1. Pull sessions for this project from corpus, group by local date.
+    proj_filter, proj_param = _project_dir_filter(project_dir, "s")
     with sqlite3.connect(str(CORPUS_DB)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """SELECT session_id, started_at, ended_at, user_prompt_count,
                       tool_error_count, input_tokens, cache_creation_tokens,
                       cache_read_tokens, output_tokens, model_dominant, cost_usd
-               FROM sessions
-               WHERE project_dir = ? AND is_subagent = 0""",
-            (project_dir,),
+               FROM sessions s
+               WHERE s.is_subagent = 0""" + proj_filter,
+            proj_param,
         ).fetchall()
 
     by_day: dict[str, dict] = {}
@@ -742,18 +759,19 @@ def repo_swimlane(project_key: str, weeks: int = 16, source_repo: str | None = N
     out["start"], out["end"] = start.isoformat(), end.isoformat()
     out["days"] = [(start + timedelta(days=i)).isoformat() for i in range(weeks * 7)]
 
+    proj_filter, proj_param = _project_dir_filter(project_dir, "s")
     with sqlite3.connect(str(CORPUS_DB)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            """SELECT date(started_at, 'localtime') AS d, agent AS agent,
+            """SELECT date(s.started_at, 'localtime') AS d, s.agent AS agent,
                       COUNT(*) AS sessions,
-                      COALESCE(SUM(cost_usd), 0.0) AS cost,
-                      COALESCE(SUM(tool_error_count), 0) AS errors
-                 FROM sessions
-                WHERE is_subagent = 0 AND project_dir = ?
-                  AND date(started_at, 'localtime') >= ?
+                      COALESCE(SUM(s.cost_usd), 0.0) AS cost,
+                      COALESCE(SUM(s.tool_error_count), 0) AS errors
+                 FROM sessions s
+                WHERE s.is_subagent = 0""" + proj_filter + """
+                  AND date(s.started_at, 'localtime') >= ?
                 GROUP BY d, agent""",
-            (project_dir, start.isoformat()),
+            proj_param + [start.isoformat()],
         ).fetchall()
         # Skill-fire overlay: how many curated skills actually fired per
         # (agent, day) — watchmen's output being *used*, not just shipped.
@@ -763,10 +781,10 @@ def repo_swimlane(project_key: str, weeks: int = 16, source_repo: str | None = N
                       COUNT(*) AS fires
                  FROM tool_calls t JOIN sessions s ON t.session_id = s.session_id
                 WHERE t.skill_name IS NOT NULL AND t.skill_name <> ''
-                  AND s.is_subagent = 0 AND s.project_dir = ?
+                  AND s.is_subagent = 0""" + proj_filter + """
                   AND date(s.started_at, 'localtime') >= ?
                 GROUP BY d, agent""",
-            (project_dir, start.isoformat()),
+            proj_param + [start.isoformat()],
         ).fetchall()
 
     lanes: dict[str, dict] = {}
@@ -1280,8 +1298,7 @@ def skill_effectiveness(days: int = 90, project_key: str | None = None) -> list[
         project_dir = _project_dir_for_key(project_key)
         if project_dir is None:
             return []
-    proj_filter = " AND s.project_dir = ?" if project_dir else ""
-    proj_param = [project_dir] if project_dir else []
+    proj_filter, proj_param = _project_dir_filter(project_dir, "s")
 
     with sqlite3.connect(str(CORPUS_DB)) as conn:
         conn.row_factory = sqlite3.Row
@@ -1485,8 +1502,7 @@ def friction_ledger(
         project_dir = _project_dir_for_key(project_key)
         if project_dir is None:
             return out
-    proj_filter = " AND s.project_dir = ?" if project_dir else ""
-    proj_param = [project_dir] if project_dir else []
+    proj_filter, proj_param = _project_dir_filter(project_dir, "s")
 
     with sqlite3.connect(str(CORPUS_DB)) as conn:
         conn.row_factory = sqlite3.Row
@@ -1609,16 +1625,17 @@ def activity_calendar(project_key: str, weeks: int = 26) -> list[tuple[str, int]
     end = today  # inclusive
     start = today - timedelta(days=(weeks * 7 - 1 - to_sunday))
 
+    proj_filter, proj_param = _project_dir_filter(project_dir, "s")
     with sqlite3.connect(str(CORPUS_DB)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """SELECT date(p.timestamp, 'localtime') AS d, COUNT(*) AS n
                FROM prompts p JOIN sessions s ON p.session_id = s.session_id
-               WHERE s.project_dir = ? AND s.is_subagent = 0
+               WHERE s.is_subagent = 0""" + proj_filter + """
                  AND date(p.timestamp, 'localtime') >= ?
                  AND date(p.timestamp, 'localtime') <= ?
                GROUP BY date(p.timestamp, 'localtime')""",
-            (project_dir, start.isoformat(), end.isoformat()),
+            proj_param + [start.isoformat(), end.isoformat()],
         ).fetchall()
     counts = {r["d"]: r["n"] for r in rows}
     out = []
@@ -1638,6 +1655,7 @@ def activity_by_hour_dow(project_key: str, days: int = 90) -> list[list[int]]:
         return [[0] * 24 for _ in range(7)]
     cutoff = (date.today() - timedelta(days=days)).isoformat()
 
+    proj_filter, proj_param = _project_dir_filter(project_dir, "s")
     with sqlite3.connect(str(CORPUS_DB)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
@@ -1645,10 +1663,10 @@ def activity_by_hour_dow(project_key: str, days: int = 90) -> list[list[int]]:
                       CAST(strftime('%H', p.timestamp, 'localtime') AS INT) AS hr,
                       COUNT(*) AS n
                FROM prompts p JOIN sessions s ON p.session_id = s.session_id
-               WHERE s.project_dir = ? AND s.is_subagent = 0
+               WHERE s.is_subagent = 0""" + proj_filter + """
                  AND date(p.timestamp, 'localtime') >= ?
                GROUP BY dow, hr""",
-            (project_dir, cutoff),
+            proj_param + [cutoff],
         ).fetchall()
     m = [[0] * 24 for _ in range(7)]
     for r in rows:
@@ -1780,8 +1798,9 @@ def tool_usage(
         proj_dir = _project_dir_for_key(project_key)
         if not proj_dir:
             return []
-        sql += " AND s.project_dir = ?"
-        params.append(proj_dir)
+        proj_filter, proj_param = _project_dir_filter(proj_dir, "s")
+        sql += proj_filter
+        params.extend(proj_param)
     elif tracked_only:
         dirs = _tracked_project_dirs()
         if not dirs:

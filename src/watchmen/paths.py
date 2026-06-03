@@ -116,6 +116,32 @@ OUTPUT_DIR = runtime_path("output")
 INSIGHTS_DIR = runtime_dir("insights")
 
 
+def repo_dir_sql_predicate(source_repo: str, alias: str = "s") -> tuple[str, tuple[str | int, ...]]:
+    """SQL predicate selecting sessions whose ``project_dir`` is ``source_repo``
+    OR any subdirectory of it, so prompts opened from a subfolder roll up into
+    the project.
+
+    Returns ``(where_clause, params)`` for substitution into a SELECT.
+
+    Why not ``LIKE``: the previous implementation used
+    ``project_dir LIKE root || '/%'`` which broke for two reasons —
+      * it hardcoded ``/`` as the separator, so Windows paths (decoded with
+        ``\\``) never matched a subfolder; and
+      * ``_`` / ``%`` in a real path (e.g. ``dria_augmentator_frontend``) are
+        LIKE wildcards, so the pattern over-matched.
+
+    Instead we compare a fixed-length prefix and require the next character to
+    be a path separator — separator-agnostic and wildcard-free.
+    """
+    root = str(Path(source_repo).expanduser()).rstrip("/\\")
+    col = f"{alias}.project_dir"
+    where = (
+        f"({col} = ? "
+        f"OR (substr({col}, 1, ?) = ? AND substr({col}, ?, 1) IN ('/', '\\')))"
+    )
+    return where, (root, len(root), root, len(root) + 1)
+
+
 def decode_project_dir(encoded: str) -> str:
     """Map a Claude Code encoded project dir back to a real cwd.
 

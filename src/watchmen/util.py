@@ -19,7 +19,7 @@ import sqlite3
 from pathlib import Path
 
 from watchmen import state
-from watchmen.paths import ANALYSES_DIR, BUNDLES_DIR, CORPUS_DB
+from watchmen.paths import ANALYSES_DIR, BUNDLES_DIR, CORPUS_DB, repo_dir_sql_predicate
 
 
 # ─── Test-aware path roots ──────────────────────────────────────────────────
@@ -69,18 +69,17 @@ def tracked_source_repo(project_key: str) -> str | None:
     return proj.get("source_repo") if proj else None
 
 
-def project_dir_predicate(project_key: str, alias: str = "s") -> tuple[str, tuple[str, str]] | None:
+def project_dir_predicate(project_key: str, alias: str = "s") -> tuple[str, tuple[str | int, ...]] | None:
     """SQL predicate that selects sessions inside a tracked project's repo.
 
     Returns (where_clause, params) for substituting into a SELECT, or None
-    if the project isn't tracked. Two-clause predicate covers both exact
-    project_dir match and child-dir match (sessions opened from a subdir).
+    if the project isn't tracked. Covers both an exact project_dir match and
+    child-dir matches (sessions opened from a subfolder), cross-platform.
     """
     source_repo = tracked_source_repo(project_key)
     if not source_repo:
         return None
-    root = str(Path(source_repo).expanduser())
-    return f"({alias}.project_dir = ? OR {alias}.project_dir LIKE ?)", (root, root.rstrip("/") + "/%")
+    return repo_dir_sql_predicate(source_repo, alias)
 
 
 def tracked_project_keys() -> list[str]:

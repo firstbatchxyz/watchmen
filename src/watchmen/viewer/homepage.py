@@ -22,7 +22,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from watchmen.paths import BUNDLES_DIR, CORPUS_DB
+from watchmen.paths import BUNDLES_DIR, CORPUS_DB, repo_dir_sql_predicate
 from watchmen import state
 
 
@@ -454,12 +454,15 @@ def project_impact(project_key: str, weeks: int = 16) -> dict:
 
     try:
         anchor = (_now() - timedelta(weeks=weeks)).isoformat()
+        # Roll up subfolder sessions (#93 shared predicate) so the Impact card
+        # counts the same sessions as the swimlane / metrics on this page.
+        repo_where, repo_params = repo_dir_sql_predicate(source_repo, "s")
         sessions = list(
             cc.execute(
-                "SELECT started_at, tool_error_count, user_prompt_count, cost_usd "
-                "FROM sessions WHERE is_subagent = 0 AND project_dir = ? "
-                "AND started_at >= ? ORDER BY started_at",
-                (source_repo, anchor),
+                "SELECT s.started_at, s.tool_error_count, s.user_prompt_count, s.cost_usd "
+                "FROM sessions s WHERE s.is_subagent = 0 AND " + repo_where + " "
+                "AND s.started_at >= ? ORDER BY s.started_at",
+                (*repo_params, anchor),
             )
         )
     finally:
