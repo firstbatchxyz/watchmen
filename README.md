@@ -53,7 +53,7 @@ is uploaded outside those explicit LLM calls.
 
 While you work, it:
 
-- 🤖 **Captures sessions from every agent** — Claude Code (`~/.claude/projects/`), Codex (`~/.codex/sessions/`), pi.dev. One corpus across tools.
+- 🤖 **Captures sessions from every agent** — Claude Code (`~/.claude/projects/`), Codex (`~/.codex/sessions/`), pi.dev, OpenCode, and Cursor (`globalStorage/state.vscdb`). One corpus across tools.
 - 📚 **Auto-curates skills** — recurring procedures get turned into runnable skill bundles your agent can call: `SKILL.md` + scripts + references.
 - ✍️ **Auto-writes CLAUDE.md + AGENTS.md** — workspace brief, identical content for both, refreshed continuously.
 - 📈 **Surfaces what's working** — mission control web UI, per-project impact tracking, friction signals, action queue.
