@@ -23,25 +23,23 @@ and old rows survive):
 
 A message carries `type` (1 = user, 2 = assistant), `text`, optional
 `thinking` (assistant reasoning), and optional `toolFormerData` (a tool call:
-name + params, and a partial outcome signal — `userDecision` (accepted /
-rejected) and sometimes `result` / `errorDetails`).
+name + params, an outcome `status`, and a `result`/`additionalData` payload).
 
 What this adapter can and cannot populate
 -----------------------------------------
-Cursor's store is conversation text + tool *invocations* + a partial outcome
-signal. We populate:
-  - `is_error` from `toolFormerData.userDecision == "rejected"` (user denied the
-    call) and from an error-bearing `result` / `errorDetails`. A user rejection
-    counts as an error but carries NO friction signature — it's not the agent's
-    recurring mistake — matching how the JSONL adapters treat rejections.
+Cursor's store is conversation text + tool *invocations* + an outcome signal +
+per-bubble `createdAt` timestamps. We populate:
+  - `is_error` from `toolFormerData.status` ("error"/"cancelled"/… vs
+    "completed"/"success"), `additionalData.status`, or a `userDecision ==
+    "rejected"` on older builds. A user rejection counts as an error but carries
+    NO friction signature — it's not the agent's recurring mistake — matching
+    how the JSONL adapters treat rejections (#110).
+  - started_at / ended_at / duration from the bubbles' `createdAt` ISO
+    timestamps.
 But NOT:
-  - full tool *output* — Cursor stores the decision/result summary, not the raw
-    tool stdout, so error signatures are sparser than the JSONL agents'.
-  - per-turn token usage or cost — so token columns and `cost_usd` are 0. We do
-    NOT estimate from a price table because there are no reliable per-turn token
-    counts to price (per-skill cost attribution, #94, is likewise unavailable).
-  - reliable timestamps — the store has no per-message time we can trust, so
-    started_at/ended_at/duration stay None and the session sorts by file mtime.
+  - per-turn token usage or cost — the store's `tokenCount` is unreliable
+    (commonly 0), so token columns and `cost_usd` stay 0. We do NOT estimate
+    from a price table (per-skill cost attribution, #94, is unavailable).
 
 project_dir comes from the conversation's `context.fileSelections[].uri.fsPath`
 when present (the common workspace root of the files the chat touched); when the
@@ -63,12 +61,23 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
 from watchmen.adapters._shared import extract_skill_from_args, normalize_error_signature
 
 NAME = "cursor"
+
+
+def _parse_iso(ts):
+    """Parse an ISO-8601 timestamp (tolerating a trailing 'Z'), else None."""
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 # Cursor's global chat store, per OS. The macOS path is the primary one; the
 # others mirror VS Code's storage convention for Cursor. Resolved lazily in
@@ -233,16 +242,30 @@ def _message_text(msg: dict) -> str:
     return t if isinstance(t, str) else ""
 
 
+def _message_ts(msg: dict) -> str | None:
+    """An ISO-8601 timestamp if the bubble carries one. Verified against a real
+    install: bubbles store `createdAt` like "2026-06-04T12:15:14.833Z"."""
+    ts = msg.get("createdAt")
+    return ts if isinstance(ts, str) and ts else None
+
+
 def _tool_name(msg: dict) -> str | None:
-    """A tool call is recorded in `toolFormerData`. Pull the tool's name from
-    the field names Cursor has used (`name` / `tool` / `toolName`)."""
+    """A tool call is recorded in `toolFormerData`. Prefer the human-readable
+    `name` (e.g. "run_terminal_command_v2", verified against a real install);
+    fall back to other string fields. `tool` is a numeric tool-id in current
+    builds, so we only use it as a last-resort stringified id."""
     tfd = msg.get("toolFormerData")
     if not isinstance(tfd, dict):
         return None
-    for k in ("name", "tool", "toolName"):
+    for k in ("name", "toolName"):
         v = tfd.get(k)
         if isinstance(v, str) and v:
             return v
+    tool = tfd.get("tool")
+    if isinstance(tool, str) and tool:
+        return tool
+    if isinstance(tool, int):
+        return f"tool_{tool}"  # numeric tool-id; no name table to resolve it
     return "?"  # tool call present but shape unfamiliar
 
 
@@ -270,38 +293,65 @@ def _tool_skill(msg: dict):
 def _tool_failure(msg: dict) -> tuple[int, str | None]:
     """Decide whether a tool call counts as a failure, and its error signature.
 
-    Cursor's `toolFormerData` does persist a partial result signal the other
-    fields don't have:
-      - `userDecision == "rejected"` — the user denied the tool. That's a
-        user-driven outcome (like Claude Code's "tool use was rejected"), so it
-        counts as an error but carries NO friction signature (it's not the
-        agent's recurring mistake — `normalize_error_signature` returns None for
-        these anyway).
-      - `result` / `errorDetails` carrying an error — fold it into a signature
-        for the friction ledger (#110).
+    `toolFormerData` carries the call's outcome. Verified against a real Cursor
+    install, a completed call looks like:
+        {"tool": 15, "name": "run_terminal_command_v2", "status": "completed",
+         "params": "{...}", "result": "{\\"output\\": \\"...\\"}",
+         "additionalData": {"status": "success", ...}}
 
-    Returns (is_error, error_signature). Success → (0, None).
+    The outcome signal, in priority order:
+      - `status` — "completed"/"success" is fine; "error"/"failed"/"cancelled"/
+        "aborted"/"rejected" is a failure.
+      - `additionalData.status` — secondary "success"/"error" flag.
+      - `userDecision == "rejected"` — older builds recorded a user denial here.
+        A user rejection counts as an error but carries NO friction signature
+        (it's not the agent's recurring mistake).
+      - an error-bearing `result` / `errorDetails` payload — folded into a
+        signature for the friction ledger (#110).
+
+    Returns (is_error, error_signature). Success → (0, None). Every access is
+    defensive so an unfamiliar shape degrades to "success" rather than raising.
     """
     tfd = msg.get("toolFormerData")
     if not isinstance(tfd, dict):
         return 0, None
 
+    _OK = {"completed", "success", "done", "finished"}
+    _BAD = {"error", "errored", "failed", "failure", "cancelled", "canceled",
+            "aborted", "rejected", "denied", "timeout", "timed_out"}
+
+    def _status_of(d) -> str | None:
+        s = d.get("status") if isinstance(d, dict) else None
+        return s.lower() if isinstance(s, str) and s else None
+
+    # User rejection (older builds): error, but not agent friction.
     decision = tfd.get("userDecision")
     if isinstance(decision, str) and decision.lower() == "rejected":
-        return 1, None  # user-rejected: error, but not agent friction
+        return 1, None
 
-    # An explicit error payload, if Cursor wrote one. `result` is usually a
-    # JSON string; surface its text to the signature folder, which decides
-    # whether it's real friction.
-    err = tfd.get("errorDetails")
-    if err:
-        sig = normalize_error_signature(err if isinstance(err, str) else json.dumps(err))
+    status = _status_of(tfd) or _status_of(tfd.get("additionalData"))
+    if status in _OK:
+        return 0, None
+    if status in _BAD:
+        # Genuine tool failure: fold the result/error text into a signature.
+        payload = tfd.get("errorDetails") or tfd.get("result")
+        sig = None
+        if payload:
+            sig = normalize_error_signature(
+                payload if isinstance(payload, str) else json.dumps(payload)
+            )
         return 1, sig
 
+    # No usable status: fall back to inspecting an explicit error payload.
+    err = tfd.get("errorDetails")
+    if err:
+        return 1, normalize_error_signature(
+            err if isinstance(err, str) else json.dumps(err)
+        )
     result = tfd.get("result")
     if isinstance(result, str) and result:
-        low = result.lower()
-        if '"error"' in low or '"rejected":true' in low.replace(" ", ""):
+        low = result.replace(" ", "").lower()
+        if '"error"' in low or '"rejected":true' in low:
             return 1, normalize_error_signature(result)
     return 0, None
 
@@ -409,13 +459,20 @@ def scan(entry: dict):
             mtype = msg.get("type")
             session["message_count"] += 1
 
+            ts = _message_ts(msg)
+            if ts:
+                if not session["started_at"] or ts < session["started_at"]:
+                    session["started_at"] = ts
+                if not session["ended_at"] or ts > session["ended_at"]:
+                    session["ended_at"] = ts
+
             if mtype == 1:  # user
                 text = _message_text(msg)
                 if not text.strip():
                     continue
                 prompts.append({
                     "session_id": session["session_id"],
-                    "timestamp": None,
+                    "timestamp": ts,
                     "text": text,
                     "word_count": len(text.split()),
                     "char_count": len(text),
@@ -437,7 +494,7 @@ def scan(entry: dict):
                         session["tool_error_count"] += 1
                     tool_calls.append({
                         "session_id": session["session_id"],
-                        "timestamp": None,
+                        "timestamp": ts,
                         "tool_name": _tool_name(msg) or "?",
                         "is_error": is_error,
                         "skill_name": _tool_skill(msg),
@@ -449,4 +506,7 @@ def scan(entry: dict):
         except Exception:
             pass
 
+    a, b = _parse_iso(session["started_at"]), _parse_iso(session["ended_at"])
+    if a and b:
+        session["duration_seconds"] = (b - a).total_seconds()
     return session, prompts, tool_calls

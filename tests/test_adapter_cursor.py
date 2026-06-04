@@ -251,6 +251,71 @@ def test_scan_recovers_messages_from_standalone_bubbles(tmp_path):
     assert [p["text"] for p in prompts] == ["first user msg", "second user msg"]
 
 
+def test_scan_real_schema_status_name_timestamp(tmp_path):
+    """Mirrors the toolFormerData shape verified against a real Cursor install:
+    `name` is the human tool name, `tool` is a numeric id, `status` is the
+    outcome, bubbles carry `createdAt`. A completed call is not an error, and
+    started_at/ended_at/duration come from createdAt."""
+    db = tmp_path / "state.vscdb"
+    _make_db(db, {
+        "composerData:r": {"composerId": "r", "conversation": [
+            {"type": 1, "bubbleId": "b1", "text": "list the files",
+             "createdAt": "2026-06-04T12:16:51.414Z"},
+            {"type": 2, "bubbleId": "b2", "text": "Listing.",
+             "createdAt": "2026-06-04T12:16:55.000Z"},
+            {"type": 2, "bubbleId": "b3", "text": "",
+             "createdAt": "2026-06-04T12:17:45.295Z",
+             "toolFormerData": {
+                 "tool": 15, "name": "run_terminal_command_v2", "status": "completed",
+                 "params": "{\"command\":\"ls -la\"}",
+                 "result": "{\"output\":\"total 0\\n...\"}",
+                 "additionalData": {"status": "success"}}},
+        ]},
+    })
+    session, prompts, tool_calls = _scan(db, "r")
+    assert session["tool_use_count"] == 1
+    assert tool_calls[0]["tool_name"] == "run_terminal_command_v2"  # name, not tool id
+    assert tool_calls[0]["is_error"] == 0                            # status completed
+    assert session["tool_error_count"] == 0
+    assert prompts[0]["timestamp"] == "2026-06-04T12:16:51.414Z"
+    assert session["started_at"] == "2026-06-04T12:16:51.414Z"
+    assert session["ended_at"] == "2026-06-04T12:17:45.295Z"
+    assert session["duration_seconds"] and session["duration_seconds"] > 50
+
+
+def test_scan_status_error_is_failure_with_signature(tmp_path):
+    """A toolFormerData.status of "error" (real outcome value) marks the call as
+    a failure and folds the result into a friction signature (#110)."""
+    db = tmp_path / "state.vscdb"
+    _make_db(db, {
+        "composerData:e": {"composerId": "e", "conversation": [
+            {"type": 2, "bubbleId": "b1", "text": "",
+             "toolFormerData": {
+                 "tool": 15, "name": "run_terminal_command_v2", "status": "error",
+                 "params": "{\"command\":\"badcmd\"}",
+                 "result": "{\"output\":\"zsh: command not found: badcmd\"}"}},
+        ]},
+    })
+    session, _prompts, tool_calls = _scan(db, "e")
+    assert tool_calls[0]["is_error"] == 1
+    assert tool_calls[0]["error_signature"]  # folded from result
+    assert session["tool_error_count"] == 1
+
+
+def test_numeric_tool_id_falls_back_to_tool_n(tmp_path):
+    """If only the numeric `tool` id is present (no name), surface it as
+    `tool_<n>` rather than dropping the call's identity."""
+    db = tmp_path / "state.vscdb"
+    _make_db(db, {
+        "composerData:n": {"composerId": "n", "conversation": [
+            {"type": 2, "bubbleId": "b1", "text": "",
+             "toolFormerData": {"tool": 7, "status": "completed"}},
+        ]},
+    })
+    _session, _prompts, tool_calls = _scan(db, "n")
+    assert tool_calls[0]["tool_name"] == "tool_7"
+
+
 def test_scan_unknown_project_when_no_file_context(tmp_path):
     db = tmp_path / "state.vscdb"
     _make_db(db, {
