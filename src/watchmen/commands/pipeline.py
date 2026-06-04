@@ -317,6 +317,8 @@ def cmd_curate(args) -> int:
         cmd.append("--skip-overlap")
     if getattr(args, "approval_required", False) or proj.get("approval_required"):
         cmd.append("--approval-required")
+    if getattr(args, "auto_install", False):
+        cmd.append("--auto-install")
 
     kind = "curator-claude-only" if args.regen_claude else "curator-full"
     run_id = state.start_run(args.project, kind)
@@ -413,6 +415,7 @@ def cmd_learn(args) -> int:
     print(_bold(f"[2/2] Curator — {mode_label}…"))
     curate_args = argparse.Namespace(
         project=args.project, regen_claude=not args.full, model=args.model,
+        auto_install=True,  # Auto-install skills by default in learn workflow
     )
     rc = cmd_curate(curate_args)
 
