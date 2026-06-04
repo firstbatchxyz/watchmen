@@ -18,6 +18,7 @@ tokens/cost (the store has neither).
 """
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -136,8 +137,10 @@ def test_scan_modern_joins_bubbles_with_tool_and_skill(tmp_path):
     assert session["assistant_text_count"] == 1          # b2 has text, b3 is empty
     assert session["assistant_thinking_count"] == 1      # b2 thinking
     assert session["tool_use_count"] == 2
-    # project_dir is the common root of the two referenced files
-    assert session["project_dir"] == "/home/u/proj/src"
+    # project_dir is the common root of the two referenced files. The adapter
+    # derives it via os.path.commonpath, which uses the host's separator — "\" on
+    # Windows — so compare against an os.sep-normalized path rather than a literal.
+    assert session["project_dir"] == os.path.normpath("/home/u/proj/src")
     assert prompts[0]["text"] == "run the ble scan skill"
 
     skill_rows = [t for t in tool_calls if t["skill_name"]]
