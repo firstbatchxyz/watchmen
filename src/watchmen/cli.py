@@ -1408,6 +1408,8 @@ def build_parser() -> "WatchmenParser":
                            help="render the live Watchmen skill-mesh visualization")
     p_distill.add_argument("--json", action="store_true",
                            help="print the distillation plan as JSON")
+    p_distill.add_argument("--yes", "-y", action="store_true",
+                           help="skip the cost preflight prompt before semantic judging")
     p_distill.set_defaults(func=cmd_distill)
 
     p_compare = sub.add_parser(

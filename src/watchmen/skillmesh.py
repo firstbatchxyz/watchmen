@@ -967,6 +967,85 @@ def _synthetic_cluster_judgment(judgments: list[SkillSimilarityJudgment]) -> Ski
     )
 
 
+# Preflight estimate constants. These mirror the prompt built in
+# `_semantic_prompt` so the *input* estimate lands within ~2x of a real run:
+# every pair sends the system prompt + the JSON rubric scaffold (fixed), plus the
+# SKILL.md excerpt for each of its two members (capped, like the judge does).
+# We deliberately do NOT estimate output tokens: the judge's reply length isn't
+# knowable before the run, so the dollar figure is an input-only floor rather
+# than a fabricated total.
+_PREFLIGHT_FIXED_TOKENS_PER_PAIR = 500       # system + rubric scaffold
+_PREFLIGHT_CHARS_PER_TOKEN = 4               # rough English-text ratio
+_PREFLIGHT_DOC_CHAR_CAP = 8_000              # matches `_skill_doc_excerpt` max_chars
+
+
+@dataclass
+class SemanticDistillEstimate:
+    """A pre-run, no-HTTP estimate for `build_semantic_distill_plan`.
+
+    `pair_count` is exact — it's the number of model calls the judge loop makes,
+    and it's the headline signal regardless of how the run is billed.
+    `input_tokens` is a metadata-size approximation. `cost_usd` is an input-only
+    floor and is only meaningful when `metered` is True (a pay-per-token
+    provider); under an OAuth subscription it's left at 0.0.
+    """
+
+    skill_count: int
+    pair_count: int
+    input_tokens: int
+    model: str
+    provider: str
+    metered: bool
+    cost_usd: float
+
+
+def estimate_semantic_distill_cost(
+    project_key: str,
+    *,
+    model: str | None = None,
+    source_scope: str = "metadata",
+) -> SemanticDistillEstimate:
+    """Estimate the scale + cost of a semantic distill run without any judgment
+    HTTP calls. The pair count (= model-call count) is exact; input tokens are a
+    metadata-size approximation good to ~2x. The dollar figure is an input-only
+    floor and is only computed for metered (pay-per-token) providers — under a
+    claude-pro / chatgpt subscription there is no per-token charge to estimate."""
+    from watchmen import config
+    from watchmen.model_prices import price_for_model
+
+    nodes = load_skill_nodes(project_key, source_scope=source_scope)
+    if model is None:
+        model = config.distill_default_model()
+
+    n = len(nodes)
+    pair_count = n * (n - 1) // 2
+    # Each node's SKILL.md excerpt is sent once for every pair it appears in,
+    # i.e. (n - 1) times. Cap per-node chars the way the real prompt does.
+    per_node_doc_tokens = sum(
+        min(node.byte_size, _PREFLIGHT_DOC_CHAR_CAP) / _PREFLIGHT_CHARS_PER_TOKEN
+        for node in nodes
+    )
+    doc_tokens = int(per_node_doc_tokens * max(0, n - 1))
+    input_tokens = pair_count * _PREFLIGHT_FIXED_TOKENS_PER_PAIR + doc_tokens
+
+    provider = config.active_provider()
+    metered = provider not in config.OAUTH_PROVIDERS
+    cost_usd = 0.0
+    if metered:
+        inp_price, *_ = price_for_model(model)
+        cost_usd = round(input_tokens / 1_000_000 * inp_price, 4)
+
+    return SemanticDistillEstimate(
+        skill_count=n,
+        pair_count=pair_count,
+        input_tokens=input_tokens,
+        model=model,
+        provider=provider,
+        metered=metered,
+        cost_usd=cost_usd,
+    )
+
+
 def build_semantic_distill_plan(
     project_key: str,
     *,
