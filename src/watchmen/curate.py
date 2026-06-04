@@ -721,7 +721,7 @@ def _changelog_label(rel_path: str) -> str:
     return rel_path
 
 
-def write_changelog(out_dir: Path, run_kind: str) -> None:
+def write_changelog(out_dir: Path, run_kind: str, args) -> None:
     """Manifest-diff approach. Compares CLAUDE.md + each skills/<slug>/SKILL.md mtime
     against the prior _manifest.json snapshot and prepends a dated entry to _changelog.md
     if anything was added/updated/removed. No-op if nothing changed."""
@@ -1325,7 +1325,7 @@ def main():
 
         run_kind = "claude-md regen" if (args.skip_finder and args.skip_skills) else "full curator"
         try:
-            write_changelog(out_dir, run_kind)
+            write_changelog(out_dir, run_kind, args)
         except Exception as e:
             print(f"      changelog write failed: {type(e).__name__}: {e}", flush=True)
 
