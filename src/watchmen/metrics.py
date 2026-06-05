@@ -26,12 +26,13 @@ ROOT = Path(__file__).parent
 SUGGESTIONS_LOG = Path.home() / ".watchmen" / "suggestions.jsonl"
 
 # Friendly labels for the `agent` column in corpus.db. The DB stores adapter
-# slugs (claude_code, codex, pi); UI surfaces want display names. Fall through
-# to the raw slug for unknown adapters so future ones still render.
+# slugs (claude_code, codex, pi, cursor); UI surfaces want display names. Fall
+# through to the raw slug for unknown adapters so future ones still render.
 ADAPTER_LABELS = {
     "claude_code": "Claude Code",
     "codex": "Codex",
     "pi": "pi.dev",
+    "cursor": "Cursor",
 }
 
 
@@ -2312,6 +2313,7 @@ def agent_donut_svg(agent_counts: dict, *, size: int = 220, total_label: str = "
         "claude_code": "#3b82f6",   # blue-500
         "codex":       "#06b6d4",   # cyan-500
         "pi":          "#14b8a6",   # teal-500
+        "cursor":      "#8b5cf6",   # violet-500
     }
     fallback_palette = ["#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"]
 
@@ -2374,7 +2376,7 @@ def agent_donut_legend(agent_counts: dict) -> list[dict]:
     count, share (0..1), color. Template renders the legend with the
     same color order the donut uses."""
     total = sum(agent_counts.values()) or 1
-    colors = {"claude_code": "#3b82f6", "codex": "#06b6d4", "pi": "#14b8a6"}
+    colors = {"claude_code": "#3b82f6", "codex": "#06b6d4", "pi": "#14b8a6", "cursor": "#8b5cf6"}
     fallback = ["#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"]
     out, fb_i = [], 0
     for slug, n in sorted(agent_counts.items(), key=lambda kv: kv[1], reverse=True):

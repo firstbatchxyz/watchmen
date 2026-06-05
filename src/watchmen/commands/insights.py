@@ -211,7 +211,7 @@ def cmd_insights(args) -> int:
         # terminal. Skips adapters with zero sessions to reduce noise.
         adapter_parts = [
             f"{_ADAPTER_SHORT.get(a, a)}:{r['adapter'].get(a, 0)}"
-            for a in ("claude_code", "codex", "pi") if r["adapter"].get(a, 0) > 0
+            for a in ("claude_code", "codex", "pi", "cursor") if r["adapter"].get(a, 0) > 0
         ]
         adapter_short = " ".join(adapter_parts) or "[dim]—[/]"
         skills_str = f"[cyan]{r['skills_n']}[/]" if r["skills_n"] else "[dim]0[/]"
@@ -850,7 +850,7 @@ def _insights_facts(
     for r in rows:
         adapter_str = " ".join(
             f"{_ADAPTER_SHORT.get(a, a)}:{r['adapter'].get(a, 0)}"
-            for a in ("claude_code", "codex", "pi") if r["adapter"].get(a, 0) > 0
+            for a in ("claude_code", "codex", "pi", "cursor") if r["adapter"].get(a, 0) > 0
         ) or "—"
         lines.append(
             f"- {r['key']} | skills={r['skills_n']} | "
