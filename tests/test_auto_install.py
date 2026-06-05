@@ -59,3 +59,74 @@ def test_settings_parse_auto_install_bool():
     assert _parse_setting("auto_install", "off") == ("auto_install", 0)
     with pytest.raises(ValueError):
         _parse_setting("auto_install", "maybe")
+
+
+# ─── Regression: write_changelog must thread `args` into the auto-install hook ──
+# write_changelog() ends by calling _maybe_auto_install(..., force=args.auto_install).
+# That call is wrapped in a bare `except Exception`, so when `args` was missing
+# from write_changelog's signature the NameError was swallowed silently and
+# auto-install never ran — the feature looked wired up but did nothing. These
+# tests exercise the real write_changelog → _maybe_auto_install path so that
+# breakage can't return unnoticed.
+
+
+import argparse
+
+
+def _neutralize_changelog_side_effects(monkeypatch):
+    """Stub the heavy, environment-touching helpers write_changelog calls (git
+    commit, ~/.watchmen state publish, FTS index) so the test stays hermetic and
+    only the auto-install wiring is under test."""
+    monkeypatch.setattr(curate, "_git_commit_artifacts", lambda **k: None)
+    monkeypatch.setattr(curate, "_publish_watchmen_state", lambda **k: None)
+    monkeypatch.setattr(curate, "_build_skill_index", lambda: None)
+
+
+def test_write_changelog_force_installs_via_args(env, monkeypatch):
+    """The --auto-install path: args.auto_install=True must reach the installer
+    and symlink skills even when the project's opt-in flag is off. Under the old
+    F821 bug this raised NameError (swallowed) and nothing installed."""
+    _neutralize_changelog_side_effects(monkeypatch)
+    state.track_project("proj", str(env / "repo"))  # auto_install defaults off
+
+    out_dir = env / "bundles" / "proj"
+    args = argparse.Namespace(auto_install=True)
+    curate.write_changelog(out_dir, "full curator", args)
+
+    # force=True bypasses the opt-in, so the skill must be linked into both dirs.
+    assert (env / "claude" / "skills" / "alpha").is_symlink()
+    assert (env / "codex" / "skills" / "alpha").is_symlink()
+
+
+def test_write_changelog_propagates_args_auto_install_flag(env, monkeypatch):
+    """The force value handed to _maybe_auto_install is read from args, not a
+    constant — guards the exact `force=args.auto_install` wiring."""
+    _neutralize_changelog_side_effects(monkeypatch)
+    state.track_project("proj", str(env / "repo"))
+
+    seen: dict[str, object] = {}
+
+    def _spy(project_key, force=False):
+        seen["project_key"] = project_key
+        seen["force"] = force
+
+    monkeypatch.setattr(curate, "_maybe_auto_install", _spy)
+    out_dir = env / "bundles" / "proj"
+    curate.write_changelog(out_dir, "full curator", argparse.Namespace(auto_install=True))
+
+    # If `args` were undefined, evaluating args.auto_install would raise before
+    # the call and the swallowing except would leave `seen` empty.
+    assert seen == {"project_key": "proj", "force": True}
+
+
+def test_write_changelog_no_install_when_flag_off(env, monkeypatch):
+    """Without --auto-install and with the project opt-in off, write_changelog
+    must NOT install anything (the force value is honestly False)."""
+    _neutralize_changelog_side_effects(monkeypatch)
+    state.track_project("proj", str(env / "repo"))
+
+    out_dir = env / "bundles" / "proj"
+    curate.write_changelog(out_dir, "full curator", argparse.Namespace(auto_install=False))
+
+    assert not (env / "claude" / "skills" / "alpha").exists()
+    assert not (env / "codex" / "skills" / "alpha").exists()
