@@ -18,6 +18,7 @@ tokens/cost (the store has neither).
 """
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -136,8 +137,10 @@ def test_scan_modern_joins_bubbles_with_tool_and_skill(tmp_path):
     assert session["assistant_text_count"] == 1          # b2 has text, b3 is empty
     assert session["assistant_thinking_count"] == 1      # b2 thinking
     assert session["tool_use_count"] == 2
-    # project_dir is the common root of the two referenced files
-    assert session["project_dir"] == "/home/u/proj/src"
+    # project_dir is the common root of the two referenced files. The adapter
+    # derives it via os.path.commonpath, which uses the host's separator — "\" on
+    # Windows — so compare against an os.sep-normalized path rather than a literal.
+    assert session["project_dir"] == os.path.normpath("/home/u/proj/src")
     assert prompts[0]["text"] == "run the ble scan skill"
 
     skill_rows = [t for t in tool_calls if t["skill_name"]]
@@ -314,6 +317,104 @@ def test_numeric_tool_id_falls_back_to_tool_n(tmp_path):
     })
     _session, _prompts, tool_calls = _scan(db, "n")
     assert tool_calls[0]["tool_name"] == "tool_7"
+
+
+def test_model_from_composer_modelconfig(tmp_path):
+    """The conversation-level model comes from `composerData.modelConfig`, the
+    authoritative source verified against a real install. A concrete pick passes
+    through verbatim into models / model_dominant; tokens/cost stay zero (the
+    model signal is the NAME only, #113 follow-up)."""
+    db = tmp_path / "state.vscdb"
+    _make_db(db, {
+        "composerData:c": {
+            "composerId": "c",
+            "modelConfig": {"modelName": "composer-2.5", "maxMode": False,
+                            "selectedModels": [{"modelId": "composer-2.5"}]},
+            "conversation": [
+                {"type": 1, "bubbleId": "b1", "text": "hi",
+                 "modelInfo": {"modelName": "composer-2.5"}},
+                {"type": 2, "bubbleId": "b2", "text": "hello"},
+            ],
+        },
+    })
+    session, _prompts, _tool_calls = _scan(db, "c")
+    assert session["models"] == json.dumps(["composer-2.5"])
+    assert session["model_dominant"] == "composer-2.5"
+    # name only — no tokens/cost leak in.
+    assert session["input_tokens"] == 0 and session["output_tokens"] == 0
+    assert session["cost_usd"] == 0.0
+
+
+def test_auto_mode_default_normalizes_to_auto(tmp_path):
+    """Under Cursor's Auto mode the store records the literal "default" (verified
+    against a real install — not blank, not "auto"). We normalize it to "auto"
+    so the corpus carries an explicit Auto signal."""
+    db = tmp_path / "state.vscdb"
+    _make_db(db, {
+        "composerData:c": {
+            "composerId": "c",
+            "modelConfig": {"modelName": "default", "maxMode": False},
+            "conversation": [{"type": 1, "bubbleId": "b1", "text": "hi"}],
+        },
+    })
+    session, _prompts, _tool_calls = _scan(db, "c")
+    assert session["models"] == json.dumps(["auto"])
+    assert session["model_dominant"] == "auto"
+
+
+def test_model_falls_back_to_bubble_modelinfo(tmp_path):
+    """When the composerData row is gone (recovered from standalone bubbles), the
+    model is recovered from each user bubble's `modelInfo.modelName` — the field
+    community readers (CodeBurn) read."""
+    db = tmp_path / "state.vscdb"
+    _make_db(db, {
+        # no composerData row at all — recovered via bubble keys
+        "bubbleId:orphan:b1": {"type": 1, "text": "first",
+                               "modelInfo": {"modelName": "composer-2.5"}},
+        "bubbleId:orphan:b2": {"type": 2, "text": "reply"},
+        "bubbleId:orphan:b3": {"type": 1, "text": "second",
+                               "modelInfo": {"modelName": "composer-2.5"}},
+    })
+    session, _prompts, _tool_calls = _scan(db, "orphan")
+    assert session["models"] == json.dumps(["composer-2.5"])
+    assert session["model_dominant"] == "composer-2.5"
+
+
+def test_model_dominant_is_most_frequent(tmp_path):
+    """No per-model tokens in the store, so model_dominant is the MOST FREQUENT
+    model (not token-weighted like pi). Here two bubbles use model-b vs the
+    composer pick + one bubble on model-a, so model-b wins on count."""
+    db = tmp_path / "state.vscdb"
+    _make_db(db, {
+        "composerData:c": {
+            "composerId": "c",
+            "modelConfig": {"modelName": "model-a"},
+            "conversation": [
+                {"type": 1, "bubbleId": "b1", "text": "q1",
+                 "modelInfo": {"modelName": "model-b"}},
+                {"type": 1, "bubbleId": "b2", "text": "q2",
+                 "modelInfo": {"modelName": "model-b"}},
+            ],
+        },
+    })
+    session, _prompts, _tool_calls = _scan(db, "c")
+    # model-a: 1 (composer), model-b: 2 (bubbles) -> sorted list, b dominant
+    assert session["models"] == json.dumps(["model-a", "model-b"])
+    assert session["model_dominant"] == "model-b"
+
+
+def test_no_model_leaves_fields_empty(tmp_path):
+    """A conversation with no modelConfig and no bubble modelInfo keeps the
+    original empty default (models="[]", model_dominant=None) — we don't invent
+    a model where the store records none."""
+    db = tmp_path / "state.vscdb"
+    _make_db(db, {
+        "composerData:c": {"composerId": "c", "conversation": [
+            {"type": 1, "bubbleId": "b1", "text": "hi"}]},
+    })
+    session, _prompts, _tool_calls = _scan(db, "c")
+    assert session["models"] == "[]"
+    assert session["model_dominant"] is None
 
 
 def test_scan_unknown_project_when_no_file_context(tmp_path):
