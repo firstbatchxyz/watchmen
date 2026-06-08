@@ -27,9 +27,34 @@ PROJECTS_INDEX = WATCHMEN / "projects.json"
 STATE_DIR = WATCHMEN / "state"
 SUGGESTIONS_LOG = WATCHMEN / "suggestions.jsonl"
 
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
 # BM25 returns negative numbers; more negative = more relevant. -0.5 keeps the
-# bar fairly high; tune as we observe false positives.
-SCORE_THRESHOLD = -0.5
+# bar fairly high. Tunable without a code change as we calibrate against real
+# false positives (a stricter bar is just a more-negative number).
+SCORE_THRESHOLD = _env_float("WATCHMEN_SUGGEST_THRESHOLD", -0.5)
+
+# Anti-firehose: the hook fires on every prompt, so without a memory the same
+# skill gets re-suggested dozens of times per session (observed: one skill
+# suggested 75x in a single session). We suggest a given skill at most once per
+# session, and not again across sessions until a cooldown elapses. Both knobs
+# are env-tunable; 0 disables that layer. See _recently_suggested().
+SUGGEST_COOLDOWN_SECONDS = _env_int("WATCHMEN_SUGGEST_COOLDOWN_SECONDS", 6 * 3600)
+# Bound the seen-state file: drop records older than this on each write.
+_SEEN_TTL_SECONDS = 14 * 24 * 3600
 
 STOP_WORDS = {
     "the", "and", "for", "with", "that", "this", "from", "what", "when", "where",
@@ -94,6 +119,56 @@ def write_suggestion(project_key: str, suggestion: dict | None) -> None:
     target.write_text(json.dumps(suggestion, indent=2))
 
 
+def _seen_path(project_key: str) -> Path:
+    return STATE_DIR / f"{project_key}.suggest_seen.json"
+
+
+def _load_seen(project_key: str) -> dict:
+    """Per-(session, skill) record of when we last surfaced a suggestion.
+
+    Shape: {"<session_id>|<skill_slug>": <unix_ts>}. Used to suppress repeats
+    so a skill is surfaced once per session and not again until the cooldown
+    elapses. Corrupt/missing state degrades to "nothing seen" — at worst we
+    show one extra suggestion, never a crash in the hot path of every prompt.
+    """
+    try:
+        data = json.loads(_seen_path(project_key).read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _recently_suggested(seen: dict, session_id: str | None, skill_slug: str, now: float) -> bool:
+    """True if this skill should be suppressed for this prompt.
+
+    Same session: suppress any repeat (suggest once per session). Across
+    sessions: suppress until SUGGEST_COOLDOWN_SECONDS has elapsed since the
+    last time we surfaced it anywhere. A cooldown of 0 disables the
+    cross-session layer (same-session dedup still applies).
+    """
+    sid = session_id or "?"
+    if f"{sid}|{skill_slug}" in seen:
+        return True
+    if SUGGEST_COOLDOWN_SECONDS <= 0:
+        return False
+    last = max(
+        (ts for key, ts in seen.items() if key.split("|", 1)[-1] == skill_slug),
+        default=None,
+    )
+    return last is not None and (now - last) < SUGGEST_COOLDOWN_SECONDS
+
+
+def _record_seen(project_key: str, seen: dict, session_id: str | None, skill_slug: str, now: float) -> None:
+    """Stamp this suggestion and prune expired records, then persist."""
+    seen[f"{session_id or '?'}|{skill_slug}"] = now
+    fresh = {k: ts for k, ts in seen.items() if isinstance(ts, (int, float)) and now - ts < _SEEN_TTL_SECONDS}
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _seen_path(project_key).write_text(json.dumps(fresh))
+    except OSError:
+        pass
+
+
 def main() -> int:
     raw = sys.stdin.read()
     if not raw:
@@ -140,6 +215,16 @@ def main() -> int:
         write_suggestion(project_key, None)
         return 0
 
+    # Anti-firehose: if we've already surfaced this skill (this session, or
+    # within the cooldown), stay silent rather than re-asserting it every
+    # prompt. Leave any prior suggestion file untouched — the user has already
+    # been informed once; nagging is how a useful signal becomes noise.
+    session_id = evt.get("session_id")
+    now = time.time()
+    seen = _load_seen(project_key)
+    if _recently_suggested(seen, session_id, skill_slug, now):
+        return 0
+
     suggestion = {
         "schema": 1,
         "ts": time.strftime("%Y-%m-%dT%H:%M"),
@@ -148,6 +233,7 @@ def main() -> int:
         "prompt_excerpt": prompt[:140] + ("…" if len(prompt) > 140 else ""),
     }
     write_suggestion(project_key, suggestion)
+    _record_seen(project_key, seen, session_id, skill_slug, now)
 
     # Append-only audit log for the metrics aggregator. Each suggestion fire is
     # one JSON line; the aggregator joins with subsequent prompts to compute
