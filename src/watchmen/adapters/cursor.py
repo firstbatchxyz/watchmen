@@ -28,7 +28,7 @@ name + params, an outcome `status`, and a `result`/`additionalData` payload).
 What this adapter can and cannot populate
 -----------------------------------------
 Cursor's store is conversation text + tool *invocations* + an outcome signal +
-per-bubble `createdAt` timestamps. We populate:
+per-bubble `createdAt` timestamps + a model *label*. We populate:
   - `is_error` from `toolFormerData.status` ("error"/"cancelled"/… vs
     "completed"/"success"), `additionalData.status`, or a `userDecision ==
     "rejected"` on older builds. A user rejection counts as an error but carries
@@ -36,10 +36,20 @@ per-bubble `createdAt` timestamps. We populate:
     how the JSONL adapters treat rejections (#110).
   - started_at / ended_at / duration from the bubbles' `createdAt` ISO
     timestamps.
+  - `models` / `model_dominant` from the model NAME the store records (#113
+    follow-up). Verified against a real install: the authoritative source is the
+    composer's `modelConfig.modelName`; each *user* bubble (type 1) also stamps
+    the same value at `modelInfo.modelName` (the field community readers like
+    CodeBurn read), which we use as a fallback when the composer row is gone.
+    Under Cursor's Auto mode the store records the literal "default" (not blank,
+    not "auto"); we normalize that to "auto" so the corpus reads cleanly. There
+    are no per-model token counts, so `model_dominant` is the MOST FREQUENT
+    model across the conversation, not the token-weighted one pi.py uses.
 But NOT:
   - per-turn token usage or cost — the store's `tokenCount` is unreliable
     (commonly 0), so token columns and `cost_usd` stay 0. We do NOT estimate
-    from a price table (per-skill cost attribution, #94, is unavailable).
+    from a price table (per-skill cost attribution, #94, is unavailable). The
+    model signal above is the NAME only; it adds no token/cost information.
 
 project_dir comes from the conversation's `context.fileSelections[].uri.fsPath`
 when present (the common workspace root of the files the chat touched); when the
@@ -249,6 +259,43 @@ def _message_ts(msg: dict) -> str | None:
     return ts if isinstance(ts, str) and ts else None
 
 
+def _normalize_model(name) -> str | None:
+    """Map a raw Cursor model label to the value we store, or None to skip it.
+
+    Verified against a real install: under Auto mode the store records the
+    literal "default" rather than a concrete model or a blank — we surface that
+    as "auto" so the corpus carries an explicit, readable Auto signal. Any other
+    non-empty string is a concrete model selection and passes through verbatim.
+    """
+    if not isinstance(name, str):
+        return None
+    name = name.strip()
+    if not name:
+        return None
+    return "auto" if name == "default" else name
+
+
+def _composer_model(convo: dict) -> str | None:
+    """The conversation-level model from `composerData.modelConfig.modelName`.
+    Present on every composer in a real install (it's the picker's selection),
+    so it's our primary, most reliable model source."""
+    cfg = convo.get("modelConfig")
+    if isinstance(cfg, dict):
+        return _normalize_model(cfg.get("modelName"))
+    return None
+
+
+def _bubble_model(msg: dict) -> str | None:
+    """The per-bubble model from `modelInfo.modelName` — the field community
+    readers (CodeBurn) read. On a real install it's stamped on *user* (type 1)
+    bubbles, carrying the model that turn was sent with. Used as a fallback when
+    the composer row (and thus `modelConfig`) is missing."""
+    mi = msg.get("modelInfo")
+    if isinstance(mi, dict):
+        return _normalize_model(mi.get("modelName"))
+    return None
+
+
 def _tool_name(msg: dict) -> str | None:
     """A tool call is recorded in `toolFormerData`. Prefer the human-readable
     `name` (e.g. "run_terminal_command_v2", verified against a real install);
@@ -454,10 +501,28 @@ def scan(entry: dict):
         if project_dir:
             session["project_dir"] = project_dir
 
+        # Model label (#113 follow-up). No per-model tokens in the store, so we
+        # rank by frequency: the composer-level pick (modelConfig) counts once,
+        # and each bubble that stamps modelInfo adds another vote. model_dominant
+        # is the most frequent; ties break on first-seen order (the composer pick
+        # leads). Token/cost columns stay 0 regardless — this is the name only.
+        model_counts: dict[str, int] = {}
+        model_order: list[str] = []
+
+        def _note_model(m):
+            if not m:
+                return
+            if m not in model_counts:
+                model_order.append(m)
+            model_counts[m] = model_counts.get(m, 0) + 1
+
+        _note_model(_composer_model(convo))
+
         is_first_user = True
         for msg in _iter_messages(conn, composer_id, convo):
             mtype = msg.get("type")
             session["message_count"] += 1
+            _note_model(_bubble_model(msg))
 
             ts = _message_ts(msg)
             if ts:
@@ -505,6 +570,14 @@ def scan(entry: dict):
             conn.close()
         except Exception:
             pass
+
+    if model_counts:
+        session["models"] = json.dumps(sorted(model_counts))
+        # Most frequent wins; first-seen order (model_order) breaks ties, so the
+        # composer-level pick leads a tie with a single-vote bubble model.
+        session["model_dominant"] = max(
+            model_order, key=lambda m: (model_counts[m], -model_order.index(m))
+        )
 
     a, b = _parse_iso(session["started_at"]), _parse_iso(session["ended_at"])
     if a and b:
