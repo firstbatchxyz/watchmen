@@ -212,7 +212,7 @@ def cmd_status(args) -> int:
         bd = _adapter_breakdown(p["project_key"])
         adapters = " ".join(
             f"{label}:{bd.get(agent, 0)}"
-            for agent, label in (("claude_code", "cc"), ("codex", "cd"), ("pi", "pi"))
+            for agent, label in (("claude_code", "cc"), ("codex", "cd"), ("pi", "pi"), ("cursor", "cr"))
             if bd.get(agent, 0)
         ) or "-"
         table.add_row(
@@ -473,13 +473,13 @@ def cmd_metrics(args) -> int:
     rollup.add_row("Uptake", str(last7["uptake"]), str(last30["uptake"]))
     console.print(rollup)
     # Per-adapter breakdown — quick visibility into where this project's
-    # sessions came from (claude_code vs codex vs pi).
+    # sessions came from (claude_code vs codex vs pi vs cursor).
     breakdown = _adapter_breakdown(args.project)
     if breakdown:
         adapt = Table(show_header=True, header_style="bold cyan", expand=False)
         adapt.add_column("adapter")
         adapt.add_column("sessions", justify="right")
-        for agent in ("claude_code", "codex", "pi"):
+        for agent in ("claude_code", "codex", "pi", "cursor"):
             adapt.add_row(agent, str(breakdown.get(agent, 0)))
         console.print(adapt)
     console.print(f"\n  full daily breakdown: {config.viewer_base_url()}/p/{args.project}/metrics")

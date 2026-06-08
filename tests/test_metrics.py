@@ -150,10 +150,10 @@ def test_unknown_agent_falls_through_to_raw_slug(fresh_metrics, tmp_path):
     """A future adapter slug not in ADAPTER_LABELS should still render — we
     just show the slug verbatim instead of crashing."""
     _seed_corpus(tmp_path / "corpus.db", [
-        _row("s1", agent="cursor", project_dir="/p1"),
+        _row("s1", agent="windsurf", project_dir="/p1"),
     ])
     rows = fresh_metrics.adapter_breakdown_all(days=30)
-    assert rows[0]["label"] == "cursor"
+    assert rows[0]["label"] == "windsurf"
 
 
 # ─── compute_card_stats ──────────────────────────────────────────────────

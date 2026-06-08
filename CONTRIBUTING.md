@@ -34,7 +34,7 @@ src/watchmen/hooks/           shell hooks the package ships
 plugin/                       separate Claude Code plugin (distributed via GitHub)
 plugin-codex/                 Codex plugin (distributed via GitHub)
 tests/test_smoke.py           cold-start + regression sweep (the original smoke suite)
-tests/test_adapter_*.py       per-adapter parser tests (claude_code, codex, pi)
+tests/test_adapter_*.py       per-adapter parser tests (claude_code, codex, pi, opencode, cursor)
 tests/test_agent.py           mocked OpenRouter retry/cost-ceiling tests
 tests/conftest.py             shared sys.path setup + ROOT/SRC constants
 tests/fixtures/               adapter fixtures (jsonl session traces)
@@ -118,11 +118,17 @@ Look at:
   Linux (systemd --user). Windows hasn't been tested — likely needs a Task
   Scheduler backend or a "just run in foreground" path. WSL should already
   work since under WSL it's just Linux.
-- **Cursor adapter** — Cursor stores sessions in a SQLite db (`state.vscdb`).
-  An adapter at `src/watchmen/adapters/cursor.py` would round out the
-  coverage. There are no hooks (post-session polling only).
-- **OpenCode adapter** — File-based sessions with a clean `opencode export`
-  CLI; should be a straightforward addition.
+- **Cursor CLI chat store** — `src/watchmen/adapters/cursor.py` covers the
+  IDE chat DB (`state.vscdb`) and the agent transcripts under
+  `~/.cursor/projects/<slug>/agent-transcripts/`. The standalone
+  `cursor-agent` CLI keeps a third store at `~/.cursor/chats/<hash>/<id>/store.db`
+  (SQLite with hex-encoded JSON blobs) that we don't read yet.
+- **Cursor hooks** — Cursor 1.7+ ships agent lifecycle hooks
+  (`~/.cursor/hooks.json`, near 1:1 with Claude Code's events, payloads
+  include `transcript_path`). Wiring a third `_Host` into
+  `src/watchmen/hooks_setup.py` would get Cursor live capture instead of
+  post-session polling; the config schema differs from Claude's, so the
+  installer needs a per-host serializer.
 - **Diff view UX** — the viewer's per-run diff page works but is plain. A
   GitHub-style file tree, syntax highlighting, and "what changed in CLAUDE.md"
   callouts would be high-impact.

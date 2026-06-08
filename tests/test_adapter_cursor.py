@@ -38,11 +38,13 @@ def _make_db(path: Path, rows: dict[str, dict]) -> None:
 
 
 def _discover(db: Path):
-    """Point the adapter at exactly `db` (no per-OS / workspace fan-out)."""
+    """Point the IDE-store source at exactly `db` (no per-OS / workspace
+    fan-out, and no agent-transcript entries from the machine running the
+    tests)."""
     orig = cursor._candidate_dbs
     cursor._candidate_dbs = lambda: [db]
     try:
-        return list(cursor.discover())
+        return list(cursor._discover_ide_store())
     finally:
         cursor._candidate_dbs = orig
 
@@ -425,3 +427,200 @@ def test_scan_unknown_project_when_no_file_context(tmp_path):
     })
     session, _prompts, _tool_calls = _scan(db, "c")
     assert session["project_dir"] == "(unknown)"
+
+
+# ─── agent-transcript JSONL source ──────────────────────────────────────────
+#
+# The second store the adapter reads:
+# ~/.cursor/projects/<slug>/agent-transcripts/<sid>/<sid>.jsonl — role/message
+# lines with Claude-API-shaped content blocks, the user's prompt wrapped in
+# <user_query>, editor-injected context in sibling tags, and the only clock
+# being the human-format <timestamp> tag on user messages.
+
+TRANSCRIPT_FIXTURE = Path(__file__).parent / "fixtures" / "cursor_session.jsonl"
+
+
+def _entry(path: Path, project_dir: str = "/home/u/repos/proj") -> dict:
+    return {
+        "path": path,
+        "project_dir": project_dir,
+        "is_subagent": False,
+        "parent_session_id": None,
+    }
+
+
+def test_parse_human_timestamp_am_positive_offset():
+    assert cursor._parse_human_timestamp("Tuesday, Apr 28, 2026, 10:15 AM (UTC+3)") == "2026-04-28T07:15:00+00:00"
+
+
+def test_parse_human_timestamp_pm_and_noon_midnight():
+    # PM adds 12; 12 AM is midnight, 12 PM is noon.
+    assert cursor._parse_human_timestamp("Friday, Jun 5, 2026, 1:01 PM (UTC+3)") == "2026-06-05T10:01:00+00:00"
+    assert cursor._parse_human_timestamp("Friday, Jun 5, 2026, 12:00 AM (UTC+0)") == "2026-06-05T00:00:00+00:00"
+    assert cursor._parse_human_timestamp("Friday, Jun 5, 2026, 12:00 PM (UTC+0)") == "2026-06-05T12:00:00+00:00"
+
+
+def test_parse_human_timestamp_negative_and_fractional_offsets():
+    assert cursor._parse_human_timestamp("Monday, May 4, 2026, 9:30 AM (UTC-5)") == "2026-05-04T14:30:00+00:00"
+    assert cursor._parse_human_timestamp("Monday, May 4, 2026, 9:30 AM (UTC+5:30)") == "2026-05-04T04:00:00+00:00"
+
+
+def test_parse_human_timestamp_rejects_garbage():
+    assert cursor._parse_human_timestamp("") is None
+    assert cursor._parse_human_timestamp("not a timestamp") is None
+    assert cursor._parse_human_timestamp("Tuesday, Foo 28, 2026, 10:15 AM (UTC+3)") is None
+
+
+def test_scan_transcript_fixture():
+    session, prompts, tool_calls = cursor.scan(_entry(TRANSCRIPT_FIXTURE))
+
+    assert session["session_id"] == "cursor_session"
+    assert session["agent"] == "cursor"
+    assert session["project_dir"] == "/home/u/repos/proj"
+    assert session["message_count"] == 5
+    assert session["user_prompt_count"] == 2
+    assert session["assistant_text_count"] == 2
+    # Transcripts fold thinking into plain text blocks — never counted
+    # separately (unlike the IDE store's `thinking` field).
+    assert session["assistant_thinking_count"] == 0
+    # 3 real tool_use blocks + 1 manually-attached-skill pseudo `Skill` call.
+    assert session["tool_use_count"] == 4
+    # No tool results / usage in the transcript format → defaults.
+    assert session["tool_error_count"] == 0
+    assert session["models"] == "[]"
+    assert session["input_tokens"] == 0
+    assert session["cost_usd"] == 0.0
+
+    # Timestamps normalized to UTC ISO; duration spans first→last prompt.
+    assert session["started_at"] == "2026-04-28T07:15:00+00:00"
+    assert session["ended_at"] == "2026-04-28T10:01:00+00:00"
+    assert session["duration_seconds"] == 9960.0
+
+
+def test_transcript_extracts_user_queries_not_injected_context():
+    _, prompts, _ = cursor.scan(_entry(TRANSCRIPT_FIXTURE))
+
+    # The <attached_files>-only message must NOT become a prompt.
+    assert len(prompts) == 2
+    assert prompts[0]["text"] == "Why is the login failing in CI?"
+    assert prompts[0]["is_first_in_session"] == 1
+    assert prompts[0]["timestamp"] == "2026-04-28T07:15:00+00:00"
+    assert prompts[1]["text"] == "Now respond to the review comments"
+    assert prompts[1]["is_first_in_session"] == 0
+    assert prompts[1]["timestamp"] == "2026-04-28T10:01:00+00:00"
+
+
+def test_transcript_tool_calls_and_skill_attribution():
+    _, _, tool_calls = cursor.scan(_entry(TRANSCRIPT_FIXTURE))
+
+    assert [tc["tool_name"] for tc in tool_calls] == ["ReadFile", "Shell", "Skill", "Grep"]
+    # SKILL.md read by path → slug via the shared extractor.
+    assert tool_calls[0]["skill_name"] == "test-runner"
+    assert tool_calls[1]["skill_name"] is None
+    # Manually attached skill → pseudo `Skill` call, same convention as the
+    # Claude Code adapter's first-class Skill tool.
+    assert tool_calls[2]["skill_name"] == "coderabbit-respond"
+    assert tool_calls[2]["timestamp"] == "2026-04-28T10:01:00+00:00"
+    # Assistant turns carry no clock; tool calls inherit the prompt's stamp.
+    assert tool_calls[3]["timestamp"] == "2026-04-28T10:01:00+00:00"
+    assert all(tc["is_error"] == 0 for tc in tool_calls)
+
+
+def test_transcript_without_timestamp_tags_falls_back_to_mtime(tmp_path):
+    """Older Cursor builds didn't inject <timestamp> tags; the session should
+    land on the file-mtime day instead of being dateless."""
+    p = tmp_path / "old.jsonl"
+    p.write_text(json.dumps({"role": "user", "message": {"content": [{"type": "text", "text": "<user_query>hi</user_query>"}]}}) + "\n")
+    os.utime(p, (1_745_000_000, 1_745_000_000))  # 2025-04-18T18:13:20Z
+
+    session, prompts, _ = cursor.scan(_entry(p))
+    assert session["started_at"] == session["ended_at"] == "2025-04-18T18:13:20+00:00"
+    assert session["duration_seconds"] == 0.0
+    # Prompt rows never borrow mtime — only the session-level bounds do.
+    assert prompts[0]["timestamp"] is None
+
+
+def test_transcript_empty_or_corrupt_file(tmp_path):
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("")
+    session, prompts, tool_calls = cursor.scan(_entry(empty))
+    assert session["agent"] == "cursor"
+    assert session["message_count"] == 0
+    assert prompts == [] and tool_calls == []
+
+    corrupt = tmp_path / "corrupt.jsonl"
+    corrupt.write_text("not json\n" + json.dumps({"role": "user", "message": {"content": [{"type": "text", "text": "<user_query>hi</user_query>"}]}}) + "\n")
+    session, prompts, _ = cursor.scan(_entry(corrupt))
+    # Bad lines skipped, good lines still parsed.
+    assert session["message_count"] == 1
+    assert len(prompts) == 1
+    assert prompts[0]["timestamp"] is None  # no <timestamp> tag anywhere
+
+
+def test_discover_walks_agent_transcripts(tmp_path, monkeypatch):
+    projects = tmp_path / "projects"
+    # Real session layout: <slug>/agent-transcripts/<sid>/<sid>.jsonl
+    sid = "0a9a0a9e-3632-4c79-acbc-6cdf354e6312"
+    sess_dir = projects / "home-user-myproj" / "agent-transcripts" / sid
+    sess_dir.mkdir(parents=True)
+    (sess_dir / f"{sid}.jsonl").write_text("")
+    # A project dir without agent-transcripts must be skipped.
+    (projects / "home-user-other" / "rules").mkdir(parents=True)
+    # Stray non-dir entries inside agent-transcripts must be skipped.
+    (projects / "home-user-myproj" / "agent-transcripts" / "stray.txt").write_text("x")
+
+    monkeypatch.setattr(cursor, "PROJECTS_DIR", projects)
+    entries = list(cursor._discover_agent_transcripts())
+
+    assert len(entries) == 1
+    assert entries[0]["path"].name == f"{sid}.jsonl"
+    # Slug decodes like Claude Code's encoding minus the leading dash; the
+    # path doesn't exist on this machine so the naive fallback applies.
+    assert entries[0]["project_dir"] == "/home/user/myproj"
+    assert entries[0]["is_subagent"] is False
+    assert entries[0]["parent_session_id"] is None
+
+
+def test_discover_missing_transcript_install_is_silent(tmp_path, monkeypatch):
+    monkeypatch.setattr(cursor, "PROJECTS_DIR", tmp_path / "nope")
+    assert list(cursor._discover_agent_transcripts()) == []
+
+
+# ─── both sources behind one NAME ───────────────────────────────────────────
+
+
+def test_discover_concatenates_both_sources_and_scan_dispatches(tmp_path, monkeypatch):
+    """discover() yields IDE composers then transcript files; scan() routes on
+    the entry shape (composer_id present → IDE store)."""
+    # One composer in a synthetic IDE store…
+    db = tmp_path / "state.vscdb"
+    _make_db(db, {
+        "composerData:c1": {"conversation": [
+            {"type": 1, "text": "hello from the IDE"},
+        ]},
+    })
+    monkeypatch.setattr(cursor, "_candidate_dbs", lambda: [db])
+    # …and one agent transcript.
+    sid = "11111111-2222-3333-4444-555555555555"
+    sess_dir = tmp_path / "projects" / "home-user-proj" / "agent-transcripts" / sid
+    sess_dir.mkdir(parents=True)
+    (sess_dir / f"{sid}.jsonl").write_text(
+        json.dumps({"role": "user", "message": {"content": [{"type": "text", "text": "<user_query>hello from the agent</user_query>"}]}}) + "\n"
+    )
+    monkeypatch.setattr(cursor, "PROJECTS_DIR", tmp_path / "projects")
+
+    entries = list(cursor.discover())
+    assert len(entries) == 2
+    composer = next(e for e in entries if "composer_id" in e)
+    transcript = next(e for e in entries if "composer_id" not in e)
+
+    s1, p1, _ = cursor.scan(composer)
+    assert s1["session_id"] == "cursor/c1"
+    assert p1[0]["text"] == "hello from the IDE"
+
+    s2, p2, _ = cursor.scan(transcript)
+    assert s2["session_id"] == sid
+    assert p2[0]["text"] == "hello from the agent"
+
+    # Same agent slug from both sources, disjoint id spaces.
+    assert s1["agent"] == s2["agent"] == "cursor"

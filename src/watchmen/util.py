@@ -97,7 +97,7 @@ def tracked_project_keys() -> list[str]:
 # ─── Adapter mix + friction signals (corpus.db reads) ──────────────────────
 
 
-ADAPTER_SHORT = {"claude_code": "cc", "codex": "cd", "pi": "pi"}
+ADAPTER_SHORT = {"claude_code": "cc", "codex": "cd", "pi": "pi", "cursor": "cr"}
 
 
 def adapter_breakdown(project_key: str) -> dict[str, int]:
@@ -122,11 +122,11 @@ def adapter_breakdown(project_key: str) -> dict[str, int]:
 
 
 def format_adapter_count(breakdown: dict[str, int]) -> str:
-    """Compact `2053 cc · 417 cd · 0 pi` style line. Always shows all 3 adapters
-    so the row width is stable, even when projects don't have sessions in
-    every adapter yet."""
+    """Compact `2053 cc · 417 cd · 0 pi · 0 cr` style line. Always shows all
+    adapters so the row width is stable, even when projects don't have
+    sessions in every adapter yet."""
     parts = []
-    for agent in ("claude_code", "codex", "pi"):
+    for agent in ("claude_code", "codex", "pi", "cursor"):
         n = breakdown.get(agent, 0)
         parts.append(f"{n:>4} {ADAPTER_SHORT[agent]}")
     return " · ".join(parts)

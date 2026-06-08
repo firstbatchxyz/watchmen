@@ -64,18 +64,28 @@ the field names used by mature community readers; tested with a synthetic DB
 fixture that mirrors both the legacy and modern shapes. Cursor evolves this
 schema fairly often, so every field access is defensive — an unfamiliar row
 degrades to "skipped" rather than raising.
+
+Second source: agent-transcript JSONL
+-------------------------------------
+This module reads BOTH of Cursor's session stores. Besides the IDE chat DB
+above, Cursor's agent writes per-session JSONL transcripts to a disjoint
+store, ~/.cursor/projects/<slug>/agent-transcripts/<sid>/<sid>.jsonl (see the
+"Source 2" section below for its schema). One NAME, one adapter, two discovery
+sources — scan() dispatches on the entry shape.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
 from watchmen.adapters._shared import extract_skill_from_args, normalize_error_signature
+from watchmen.paths import decode_project_dir
 
 NAME = "cursor"
 
@@ -144,7 +154,7 @@ def _has_disk_kv(conn: sqlite3.Connection) -> bool:
         return False
 
 
-def discover() -> Iterable[dict]:
+def _discover_ide_store() -> Iterable[dict]:
     for db_path in _candidate_dbs():
         try:
             conn = _connect(db_path)
@@ -470,7 +480,7 @@ def _iter_messages(conn: sqlite3.Connection, composer_id: str, convo: dict):
             yield msg
 
 
-def scan(entry: dict):
+def _scan_composer(entry: dict):
     db_path: Path = entry.get("db_path") or entry["path"]
     composer_id: str = entry["composer_id"]
     session, prompts, tool_calls = _empty(f"cursor/{composer_id}")
@@ -583,3 +593,281 @@ def scan(entry: dict):
     if a and b:
         session["duration_seconds"] = (b - a).total_seconds()
     return session, prompts, tool_calls
+
+
+# ─── Source 2: agent-transcript JSONL ───────────────────────────────────────
+# Cursor's agent writes per-session JSONL transcripts to a second store,
+# disjoint from the IDE chat DB:
+#
+#     ~/.cursor/projects/<slug>/agent-transcripts/<session-id>/<session-id>.jsonl
+#
+# Schema notes (reverse-engineered; Cursor doesn't document this format):
+#   Each line: {"role": "user"|"assistant", "message": {"content": [blocks]}}
+#   - Blocks are Claude-API-shaped: {"type": "text"|"tool_use", ...}.
+#   - tool_use blocks carry {name, input} but no id and no paired result —
+#     tool outputs live in sibling agent-tools/<uuid>.txt files with no join
+#     key back to the call, so is_error / tool_error_count stay 0.
+#   - No model names or token usage anywhere → models/tokens/cost stay at
+#     defaults.
+#   - The user's actual prompt is wrapped in <user_query>…</user_query>;
+#     sibling tags (<attached_files>, <plugin_info>, <uploaded_documents>,
+#     <manually_attached_skills>, …) are editor-injected context, not typing.
+#   - <timestamp>Tuesday, Apr 28, 2026, 10:15 AM (UTC+3)</timestamp> precedes
+#     most queries — the only clock in the file. Assistant turns are
+#     unstamped, so ended_at is the *last prompt's* time and durations
+#     undercount the final turn. Older transcripts carry no timestamp tags at
+#     all; _scan_transcript() falls back to file mtime so they stay datable.
+#   - <manually_attached_skills> lists `Skill Name: <slug>` entries with the
+#     skill content inlined ("Only read the files if needed"), so the model
+#     usually never reads SKILL.md and the path-based detection in _shared
+#     would go blind. We record each attachment as a `Skill` tool call — the
+#     same convention the Claude Code adapter uses for its first-class Skill
+#     tool — so per-skill usage telemetry sees Cursor activations.
+
+PROJECTS_DIR = Path.home() / ".cursor" / "projects"
+
+# Cache: encoded dir name → decoded real cwd, same as the Claude Code
+# adapter. Cursor uses the same dash-flattened encoding minus the leading
+# dash ("home-work-repos-foo" instead of "-home-work-repos-foo").
+_DECODE_CACHE: dict[str, str] = {}
+
+_TS_TAG_RE = re.compile(r"<timestamp>\s*(.*?)\s*</timestamp>", re.DOTALL)
+# "Tuesday, Apr 28, 2026, 10:15 AM (UTC+3)" — weekday name, abbreviated
+# month, 12-hour clock, integer-hour UTC offset (an optional :MM is
+# accepted for half-hour zones even though none appear in observed data).
+_TS_VALUE_RE = re.compile(
+    r"[A-Za-z]+,\s+([A-Za-z]+)\s+(\d{1,2}),\s+(\d{4}),\s+"
+    r"(\d{1,2}):(\d{2})\s+(AM|PM)\s+\(UTC([+-]\d{1,2})(?::(\d{2}))?\)"
+)
+_MONTHS = {
+    m: i
+    for i, m in enumerate(
+        ("jan", "feb", "mar", "apr", "may", "jun",
+         "jul", "aug", "sep", "oct", "nov", "dec"),
+        start=1,
+    )
+}
+
+_USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL)
+_ATTACHED_SKILLS_RE = re.compile(
+    r"<manually_attached_skills>(.*?)</manually_attached_skills>", re.DOTALL
+)
+_SKILL_NAME_RE = re.compile(r"^Skill Name:\s*([A-Za-z0-9_.:-]+)\s*$", re.MULTILINE)
+
+
+def _resolve(encoded: str) -> str:
+    if encoded not in _DECODE_CACHE:
+        # Windows-style "c--Users-…" slugs already match Claude Code's
+        # encoding; POSIX slugs just lack the leading dash.
+        if len(encoded) >= 3 and encoded[0].isalpha() and encoded[1:3] == "--":
+            _DECODE_CACHE[encoded] = decode_project_dir(encoded)
+        else:
+            _DECODE_CACHE[encoded] = decode_project_dir("-" + encoded)
+    return _DECODE_CACHE[encoded]
+
+
+def _parse_human_timestamp(value: str) -> str | None:
+    """Cursor's human-format timestamp → UTC ISO 8601 string, or None."""
+    m = _TS_VALUE_RE.search(value)
+    if not m:
+        return None
+    month = _MONTHS.get(m.group(1)[:3].lower())
+    if not month:
+        return None
+    hour = int(m.group(4)) % 12
+    if m.group(6) == "PM":
+        hour += 12
+    offset = timedelta(hours=abs(int(m.group(7))), minutes=int(m.group(8) or 0))
+    if m.group(7).startswith("-"):
+        offset = -offset
+    try:
+        dt = datetime(
+            int(m.group(3)), month, int(m.group(2)), hour, int(m.group(5)),
+            tzinfo=timezone(offset),
+        )
+    except ValueError:
+        return None
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _discover_agent_transcripts() -> Iterable[dict]:
+    if not PROJECTS_DIR.exists():
+        return
+    for project_dir in sorted(PROJECTS_DIR.iterdir()):
+        transcripts = project_dir / "agent-transcripts"
+        if not transcripts.is_dir():
+            continue
+        decoded = _resolve(project_dir.name)
+        for session_dir in sorted(transcripts.iterdir()):
+            if not session_dir.is_dir():
+                continue
+            for jsonl in sorted(session_dir.glob("*.jsonl")):
+                yield {
+                    "path": jsonl,
+                    "project_dir": decoded,
+                    "is_subagent": False,
+                    "parent_session_id": None,
+                }
+
+
+def _scan_transcript(entry: dict):
+    path: Path = entry["path"]
+
+    session = {
+        "session_id": path.stem,
+        "project_dir": entry.get("project_dir") or "(unknown)",
+        "transcript_path": str(path),
+        "started_at": None,
+        "ended_at": None,
+        "duration_seconds": None,
+        "is_subagent": 0,
+        "parent_session_id": None,
+        "message_count": 0,
+        "user_prompt_count": 0,
+        "assistant_text_count": 0,
+        "assistant_thinking_count": 0,
+        "tool_use_count": 0,
+        "tool_error_count": 0,
+        "models": "[]",
+        "input_tokens": 0,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "output_tokens": 0,
+        "model_dominant": None,
+        "cost_usd": 0.0,
+        "agent": NAME,
+    }
+    prompts: list = []
+    tool_calls: list = []
+    is_first = True
+    # Timestamp of the most recent stamped user message. Assistant turns
+    # carry no clock of their own, so their tool calls inherit this — "the
+    # prompt this turn is answering" — which is correct to the minute.
+    current_ts: str | None = None
+
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            role = e.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            session["message_count"] += 1
+            msg = e.get("message", {}) or {}
+            content = msg.get("content")
+
+            if role == "user":
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    text = "\n".join(
+                        b.get("text", "")
+                        for b in content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )
+                else:
+                    continue
+
+                for tag in _TS_TAG_RE.findall(text):
+                    ts = _parse_human_timestamp(tag)
+                    if not ts:
+                        continue
+                    current_ts = ts
+                    if not session["started_at"] or ts < session["started_at"]:
+                        session["started_at"] = ts
+                    if not session["ended_at"] or ts > session["ended_at"]:
+                        session["ended_at"] = ts
+
+                queries = [q.strip() for q in _USER_QUERY_RE.findall(text)]
+                query_text = "\n\n".join(q for q in queries if q)
+                if query_text:
+                    prompts.append({
+                        "session_id": session["session_id"],
+                        "timestamp": current_ts,
+                        "text": query_text,
+                        "word_count": len(query_text.split()),
+                        "char_count": len(query_text),
+                        "is_first_in_session": int(is_first),
+                    })
+                    is_first = False
+                    session["user_prompt_count"] += 1
+
+                for tag_body in _ATTACHED_SKILLS_RE.findall(text):
+                    for slug in _SKILL_NAME_RE.findall(tag_body):
+                        session["tool_use_count"] += 1
+                        tool_calls.append({
+                            "session_id": session["session_id"],
+                            "timestamp": current_ts,
+                            "tool_name": "Skill",
+                            "is_error": 0,
+                            "skill_name": slug,
+                        })
+
+            elif role == "assistant":
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type")
+                    if btype == "text":
+                        session["assistant_text_count"] += 1
+                    elif btype == "tool_use":
+                        session["tool_use_count"] += 1
+                        tool_calls.append({
+                            "session_id": session["session_id"],
+                            "timestamp": current_ts,
+                            "tool_name": block.get("name", "?"),
+                            "is_error": 0,
+                            "skill_name": extract_skill_from_args(block.get("input")),
+                        })
+
+    if session["ended_at"] is None:
+        # Roughly half of real-world Cursor transcripts carry no <timestamp>
+        # tags at all (older Cursor builds didn't inject them). The file's
+        # mtime is the last write — i.e. the session's end — so fall back to
+        # it rather than leaving the session invisible to every time-based
+        # view. started_at mirrors it: the true start is unknowable, and a
+        # zero-duration session on the right day beats a dateless one.
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if mtime is not None:
+            iso = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+            session["started_at"] = iso
+            session["ended_at"] = iso
+
+    a = _parse_iso(session["started_at"])
+    b = _parse_iso(session["ended_at"])
+    if a and b:
+        session["duration_seconds"] = (b - a).total_seconds()
+    return session, prompts, tool_calls
+
+
+# ─── Adapter contract: both sources behind one NAME ─────────────────────────
+
+
+def discover() -> Iterable[dict]:
+    """Both Cursor stores: IDE chat-DB composers + agent-transcript JSONLs.
+
+    Entries are distinguishable by shape — composer entries carry a
+    `composer_id`, transcript entries don't — which is what scan() dispatches
+    on. The two stores have disjoint id spaces (composer sessions are
+    prefixed `cursor/<id>`, transcripts use the bare file-stem UUID), so the
+    sources can't collide in corpus.db.
+    """
+    yield from _discover_ide_store()
+    yield from _discover_agent_transcripts()
+
+
+def scan(entry: dict):
+    if "composer_id" in entry:
+        return _scan_composer(entry)
+    return _scan_transcript(entry)
