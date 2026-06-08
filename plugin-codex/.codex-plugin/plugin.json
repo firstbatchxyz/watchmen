@@ -1,6 +1,6 @@
 {
   "name": "watchmen",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Skill suggestions + workspace context from your watchmen sessions corpus, surfaced into Codex sessions.",
   "author": {
     "name": "Dria",

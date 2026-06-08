@@ -1,7 +1,7 @@
 {
   "name": "watchmen",
   "description": "Surface skill suggestions + workspace context from watchmen sessions intelligence into your Claude Code sessions",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "author": {
     "name": "dria",
     "url": "https://github.com/firstbatchxyz/watchmen"
