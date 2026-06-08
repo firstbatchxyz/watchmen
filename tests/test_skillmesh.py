@@ -685,3 +685,160 @@ def test_skillmesh_proposed_slug_prefers_source_slug_center():
         skillmesh._proposed_slug(smoke_nodes, ["challenge", "harness", "rlm", "rollout", "smoke", "test"])
         == "distilled-rlm-harness-smoke"
     )
+
+
+# ─── Cost preflight (#76) ────────────────────────────────────────────────────
+
+
+def _seed_three_skills(tmp_path, monkeypatch, provider="openrouter"):
+    from watchmen import config, skillmesh
+
+    bundles = tmp_path / "bundles"
+    project = bundles / "demo"
+    _write_skill(project, "alpha", "Alpha skill", ["use alpha"], "- step one\n- step two")
+    _write_skill(project, "beta", "Beta skill", ["use beta"], "- step one\n- step two")
+    _write_skill(project, "gamma", "Gamma skill", ["use gamma"], "- step one\n- step two")
+    monkeypatch.setattr(skillmesh, "BUNDLES_DIR", bundles)
+    monkeypatch.setattr(config, "active_provider", lambda: provider)
+    return skillmesh
+
+
+def test_estimate_pair_count_and_metered_cost(tmp_path, monkeypatch):
+    skillmesh = _seed_three_skills(tmp_path, monkeypatch, provider="openrouter")
+
+    est = skillmesh.estimate_semantic_distill_cost("demo", model="sonnet-4.6")
+
+    # 3 skills -> 3 pairs (n*(n-1)/2), the exact count the judge loop runs.
+    assert est.skill_count == 3
+    assert est.pair_count == 3
+    assert est.input_tokens > 0
+    assert est.metered is True
+    assert est.cost_usd > 0  # pay-per-token provider -> a dollar floor
+    assert est.model == "sonnet-4.6"
+
+
+def test_estimate_subscription_has_no_dollar_cost(tmp_path, monkeypatch):
+    # Under an OAuth subscription there's no per-token charge to estimate.
+    skillmesh = _seed_three_skills(tmp_path, monkeypatch, provider="claude-pro")
+
+    est = skillmesh.estimate_semantic_distill_cost("demo", model="claude-opus-4-8")
+    assert est.metered is False
+    assert est.cost_usd == 0.0
+    assert est.pair_count == 3  # the call-count signal is still there
+    assert est.provider == "claude-pro"
+
+
+def test_estimate_cost_is_input_only_floor(tmp_path, monkeypatch):
+    skillmesh = _seed_three_skills(tmp_path, monkeypatch, provider="openrouter")
+    from watchmen.model_prices import price_for_model
+
+    nodes = skillmesh.load_skill_nodes("demo")
+    n = len(nodes)
+    pair_count = n * (n - 1) // 2
+    doc_tokens = int(
+        sum(min(node.byte_size, skillmesh._PREFLIGHT_DOC_CHAR_CAP)
+            / skillmesh._PREFLIGHT_CHARS_PER_TOKEN for node in nodes)
+        * (n - 1)
+    )
+    exp_input = pair_count * skillmesh._PREFLIGHT_FIXED_TOKENS_PER_PAIR + doc_tokens
+    inp, *_ = price_for_model("sonnet-4.6")
+    exp_cost = round(exp_input / 1_000_000 * inp, 4)  # input only, no output term
+
+    est = skillmesh.estimate_semantic_distill_cost("demo", model="sonnet-4.6")
+    assert est.input_tokens == exp_input
+    assert est.cost_usd == exp_cost
+
+
+def test_estimate_scales_with_model_pricing(tmp_path, monkeypatch):
+    skillmesh = _seed_three_skills(tmp_path, monkeypatch, provider="openrouter")
+
+    cheap = skillmesh.estimate_semantic_distill_cost("demo", model="haiku-4.5")
+    pricey = skillmesh.estimate_semantic_distill_cost("demo", model="opus-4.7")
+
+    assert cheap.input_tokens == pricey.input_tokens  # same tokens, different price
+    assert pricey.cost_usd > cheap.cost_usd
+
+
+def test_estimate_single_skill_has_no_pairs(tmp_path, monkeypatch):
+    from watchmen import config, skillmesh
+
+    bundles = tmp_path / "bundles"
+    project = bundles / "solo"
+    _write_skill(project, "only", "Only skill", ["use it"], "- do a thing")
+    monkeypatch.setattr(skillmesh, "BUNDLES_DIR", bundles)
+    monkeypatch.setattr(config, "active_provider", lambda: "openrouter")
+
+    est = skillmesh.estimate_semantic_distill_cost("solo", model="sonnet-4.6")
+    assert est.pair_count == 0
+    assert est.input_tokens == 0
+    assert est.cost_usd == 0.0
+
+
+def _preflight_args(**over):
+    import argparse
+
+    base = dict(project="demo", json=False, yes=False, model="sonnet-4.6", scope="metadata")
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def test_preflight_skipped_for_json_and_yes(tmp_path, monkeypatch):
+    _seed_three_skills(tmp_path, monkeypatch)
+    from rich.console import Console
+    from watchmen.commands import distill
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("input() must not be called when preflight is skipped")
+
+    monkeypatch.setattr("builtins.input", _boom)
+    assert distill._confirm_semantic_cost(_preflight_args(json=True), Console()) is True
+    assert distill._confirm_semantic_cost(_preflight_args(yes=True), Console()) is True
+
+
+def test_preflight_skipped_when_not_a_tty(tmp_path, monkeypatch):
+    _seed_three_skills(tmp_path, monkeypatch)
+    from rich.console import Console
+    from watchmen.commands import distill
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no prompt")),
+    )
+    assert distill._confirm_semantic_cost(_preflight_args(), Console()) is True
+
+
+def test_preflight_proceeds_on_yes_and_cancels_on_no(tmp_path, monkeypatch):
+    _seed_three_skills(tmp_path, monkeypatch)
+    from rich.console import Console
+    from watchmen.commands import distill
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "y")
+    assert distill._confirm_semantic_cost(_preflight_args(), Console()) is True
+
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "")
+    assert distill._confirm_semantic_cost(_preflight_args(), Console()) is False
+
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "n")
+    assert distill._confirm_semantic_cost(_preflight_args(), Console()) is False
+
+
+def test_preflight_subscription_path_renders_without_dollars(tmp_path, monkeypatch, capsys):
+    # Smoke: the subscription branch renders a quota line, not a price, and the
+    # confirm still works.
+    _seed_three_skills(tmp_path, monkeypatch, provider="claude-pro")
+    from rich.console import Console
+    from watchmen.commands import distill
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "y")
+    console = Console(force_terminal=False)
+    assert distill._confirm_semantic_cost(_preflight_args(model="claude-opus-4-8"), console) is True
+    out = capsys.readouterr().out
+    assert "subscription" in out
+    assert "quota" in out
+    assert "$" not in out

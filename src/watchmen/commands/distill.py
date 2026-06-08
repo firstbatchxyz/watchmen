@@ -13,6 +13,7 @@ from watchmen.skillmesh import (
     apply_distilled_candidates,
     build_distill_plan,
     build_semantic_distill_plan,
+    estimate_semantic_distill_cost,
     render_plan_animation,
     render_plan_summary,
     stageable_distill_clusters,
@@ -20,6 +21,64 @@ from watchmen.skillmesh import (
     write_distill_plan,
 )
 from watchmen.ui import dim, green, yellow
+
+
+def _confirm_semantic_cost(args, console: Console) -> bool:
+    """Show a cost preflight before the O(n^2) semantic distill judgments and ask
+    to continue. Returns True to proceed, False if the user declines.
+
+    Skipped (returns True) for `--json`, non-interactive stdin, or `--yes`, so
+    automated callers see no behaviour change. If the estimate itself can't be
+    built we proceed and let the real run surface the proper error.
+    """
+    if getattr(args, "json", False) or getattr(args, "yes", False):
+        return True
+    if not sys.stdin.isatty():
+        return True
+    try:
+        est = estimate_semantic_distill_cost(
+            args.project,
+            model=getattr(args, "model", None),
+            source_scope=str(getattr(args, "scope", "metadata")),
+        )
+    except Exception:
+        return True  # real run handles missing skills / bad scope with a clear message
+
+    if est.pair_count <= 0:
+        return True  # nothing to judge; let the normal flow report it
+
+    console.print(f"\n[bold]distill {args.project}[/]")
+    console.print(dim("─" * 13))
+    # The call count is the headline: it's exact and meaningful no matter how the
+    # run is billed.
+    console.print(
+        f"{est.skill_count} skills → {est.pair_count} pair judgments "
+        f"({est.pair_count} model calls to {est.model})"
+    )
+    console.print(dim(f"~{est.input_tokens // 1000}k input tokens"))
+    if est.metered:
+        # Pay-per-token: a dollar floor (input only — the judge's output length
+        # isn't knowable before the run, so we don't invent it).
+        console.print(
+            dim(f"estimated cost ~${est.cost_usd:.2f} (input tokens only; output not counted)")
+        )
+    else:
+        # OAuth subscription: no per-token charge, but the calls still burn quota.
+        console.print(
+            dim(
+                f"billed under your {est.provider} subscription — no per-token charge, "
+                f"but this spends {est.pair_count} calls against your quota"
+            )
+        )
+    try:
+        answer = input("\ncontinue? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print(dim("\ndistill cancelled"))
+        return False
+    if answer in ("y", "yes"):
+        return True
+    console.print(dim("distill cancelled"))
+    return False
 
 
 def _cluster_line(cluster: SkillCluster) -> str:
@@ -217,6 +276,9 @@ def cmd_distill(args) -> int:
     threshold = getattr(args, "threshold", None)
     if threshold is None:
         threshold = 0.80 if use_llm else 0.28
+    if use_llm and not _confirm_semantic_cost(args, console):
+        return 0
+
     try:
         if use_llm:
             plan = build_semantic_distill_plan(
