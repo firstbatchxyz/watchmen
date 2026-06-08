@@ -162,6 +162,28 @@ def test_no_match_clears_prior_suggestion(hook, monkeypatch):
     assert _suggestion(hook) is None
 
 
+def test_no_session_id_not_wedged_with_cooldown_zero(hook, monkeypatch):
+    """With no session_id, prompts share the "?" bucket. A bare presence check
+    would mute the skill forever; with cooldown=0 disabled, each prompt must
+    still surface it (no permanent wedge)."""
+    monkeypatch.setattr(hook, "SUGGEST_COOLDOWN_SECONDS", 0)
+    _run(hook, monkeypatch, "deploy provision railway stack", None)
+    _run(hook, monkeypatch, "deploy provision railway stack", None)
+    assert len(_log_lines(hook)) == 2
+
+
+def test_no_session_id_respects_cooldown_window(hook, monkeypatch):
+    """No session_id falls through to the time-based cooldown: a numeric stamp
+    inside the window suppresses, regardless of the "?" key."""
+    now = time.time()
+    monkeypatch.setattr(hook, "SUGGEST_COOLDOWN_SECONDS", 6 * 3600)
+    seen = {"?|railway-stack-provision": now - 60}  # surfaced 60s ago, no session
+    assert hook._recently_suggested(seen, None, "railway-stack-provision", now) is True
+    # ...and once the window has elapsed, it's eligible again.
+    old = {"?|railway-stack-provision": now - 7 * 3600}
+    assert hook._recently_suggested(old, None, "railway-stack-provision", now) is False
+
+
 def test_corrupt_seen_state_does_not_crash_prompt(hook, monkeypatch):
     """A corrupt/hand-edited seen-state file (non-numeric timestamp) must not
     crash the hook — it runs on every prompt, so a crash breaks submission.

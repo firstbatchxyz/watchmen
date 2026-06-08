@@ -146,8 +146,12 @@ def _recently_suggested(seen: dict, session_id: str | None, skill_slug: str, now
     last time we surfaced it anywhere. A cooldown of 0 disables the
     cross-session layer (same-session dedup still applies).
     """
-    sid = session_id or "?"
-    if f"{sid}|{skill_slug}" in seen:
+    # Same-session "suggest once" only applies when we actually have a session
+    # identity. With no session_id every prompt would share the "?" bucket, so
+    # a bare presence check would mute the skill forever (cooldown never
+    # consulted, the suppressed path never re-stamps or prunes it). No session
+    # → fall through to the time-based cooldown, which is the right bound there.
+    if session_id and f"{session_id}|{skill_slug}" in seen:
         return True
     if SUGGEST_COOLDOWN_SECONDS <= 0:
         return False
