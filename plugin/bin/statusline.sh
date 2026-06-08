@@ -42,7 +42,7 @@ except Exception:
     pass
 " 2>/dev/null)
   if [ -n "${SKILL}" ]; then
-    printf '\033[33m💡 you could have used /%s to save time & tokens on this task\033[0m\n' "${SKILL}"
+    printf '\033[33m💡 /%s fits this kind of task — run it to save time & tokens\033[0m\n' "${SKILL}"
     exit 0
   fi
 fi
