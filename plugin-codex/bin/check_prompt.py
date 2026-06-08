@@ -151,8 +151,14 @@ def _recently_suggested(seen: dict, session_id: str | None, skill_slug: str, now
         return True
     if SUGGEST_COOLDOWN_SECONDS <= 0:
         return False
+    # Only numeric stamps count: a corrupt or hand-edited state file could hold
+    # a non-number, and `now - last` on a string would raise in the hot path of
+    # every prompt. Ignoring it falls back to "not recently suggested" — at
+    # worst we show one extra suggestion, and _record_seen then rewrites a clean
+    # numeric value (and prunes the junk).
     last = max(
-        (ts for key, ts in seen.items() if key.split("|", 1)[-1] == skill_slug),
+        (ts for key, ts in seen.items()
+         if key.split("|", 1)[-1] == skill_slug and isinstance(ts, (int, float))),
         default=None,
     )
     return last is not None and (now - last) < SUGGEST_COOLDOWN_SECONDS
@@ -221,9 +227,15 @@ def main() -> int:
     # been informed once; nagging is how a useful signal becomes noise.
     session_id = evt.get("session_id")
     now = time.time()
-    seen = _load_seen(project_key)
-    if _recently_suggested(seen, session_id, skill_slug, now):
-        return 0
+    # Dedup must never break prompt submission: any unexpected failure here
+    # fails open (treat as not-recently-suggested) rather than raising.
+    seen: dict = {}
+    try:
+        seen = _load_seen(project_key)
+        if _recently_suggested(seen, session_id, skill_slug, now):
+            return 0
+    except Exception:
+        seen = {}
 
     suggestion = {
         "schema": 1,

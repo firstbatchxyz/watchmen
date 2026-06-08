@@ -162,6 +162,28 @@ def test_no_match_clears_prior_suggestion(hook, monkeypatch):
     assert _suggestion(hook) is None
 
 
+def test_corrupt_seen_state_does_not_crash_prompt(hook, monkeypatch):
+    """A corrupt/hand-edited seen-state file (non-numeric timestamp) must not
+    crash the hook — it runs on every prompt, so a crash breaks submission.
+    The hook fails open: it still surfaces the suggestion."""
+    monkeypatch.setattr(hook, "SUGGEST_COOLDOWN_SECONDS", 6 * 3600)
+    (hook._state / "proj.suggest_seen.json").write_text(
+        json.dumps({"somesession|railway-stack-provision": "not-a-number"})
+    )
+    rc = _run(hook, monkeypatch, "deploy provision railway stack", "s-new")
+    assert rc == 0
+    assert _suggestion(hook) is not None  # fell open, surfaced rather than crashed
+
+
+def test_recently_suggested_ignores_non_numeric_stamp(hook):
+    """The cross-session cooldown scan skips non-numeric stamps instead of
+    raising on the arithmetic."""
+    now = time.time()
+    seen = {"s1|railway-stack-provision": "bad", "s2|railway-stack-provision": now - 60}
+    # Should not raise; the numeric stamp 60s ago is within the default cooldown.
+    assert hook._recently_suggested(seen, "s3", "railway-stack-provision", now) is True
+
+
 def test_recently_suggested_prunes_on_record(hook):
     """Records older than the TTL are dropped when a new one is written, so the
     seen-state file can't grow without bound."""
