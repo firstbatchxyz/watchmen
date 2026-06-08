@@ -139,6 +139,18 @@ watchmen statusline install
 
 You then get `/skills brief` (or `$brief`) inside Codex with the same workspace digest behavior as `/watchmen:brief` in Claude Code. Codex has no statusline, so the live skill-suggestion hint is on-demand `brief` instead.
 
+### Guided setup skill
+
+Once the plugin is installed, `/watchmen:setup` (Claude Code) or `$setup` (Codex) walks the whole flow above for you — install check, the `init` wizard hand-off, the `/plugin` steps, statusline, and a closing `watchmen doctor`. Handy for wiring a second agent, repairing, or verifying an install.
+
+To use it on a fresh machine *before* any plugin exists, drop the skill in standalone first, then start a new Claude Code session and run `/setup`:
+
+```bash
+mkdir -p ~/.claude/skills/setup
+curl -fsSL https://raw.githubusercontent.com/firstbatchxyz/watchmen/main/plugin/skills/setup/SKILL.md \
+  -o ~/.claude/skills/setup/SKILL.md
+```
+
 ## Requirements
 
 - macOS, Linux, or Windows 10/11
