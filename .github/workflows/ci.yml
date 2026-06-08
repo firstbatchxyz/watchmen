@@ -31,6 +31,41 @@ jobs:
       - name: Format diff (informational)
         run: uv tool run ruff format --check --diff src/watchmen tests || true
 
+  plugin-version:
+    # The plugin ships to Claude Code / Codex via a marketplace clone, and
+    # `/plugin` only refreshes its cache when plugin.json's version changes.
+    # We once let plugin/bin drift a month ahead of a frozen version, so every
+    # installed user was stuck. Guard: if plugin payload changed vs base, the
+    # version must bump too.
+    name: plugin version bump
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a version bump when plugin payload changes
+        shell: bash
+        run: |
+          base="origin/${{ github.base_ref }}"
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          changed=$(git diff --name-only "$base"...HEAD)
+          payload=$(echo "$changed" | grep -E '^(plugin|plugin-codex)/(bin|hooks|skills)/' || true)
+          if [ -z "$payload" ]; then
+            echo "No plugin payload changed; version bump not required."
+            exit 0
+          fi
+          echo "Plugin payload changed:"; echo "$payload"
+          for mf in plugin/.claude-plugin/plugin.json plugin-codex/.codex-plugin/plugin.json; do
+            old=$(git show "$base:$mf" | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
+            new=$(python3 -c "import json; print(json.load(open('$mf'))['version'])")
+            echo "$mf: $old -> $new"
+            if [ "$old" = "$new" ]; then
+              echo "::error::$mf payload changed but version stayed $old. Bump it so /plugin picks up the update."
+              exit 1
+            fi
+          done
+
   tests:
     name: tests (${{ matrix.os }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}
