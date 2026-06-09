@@ -203,23 +203,28 @@ def _manifest_entry(links: list[dict], target: Path) -> dict | None:
 
 
 def _is_managed(target: Path, links: list[dict]) -> bool:
-    r"""True if watchmen owns this target — either it's in the manifest, or it's
-    a symlink already pointing inside BUNDLES_DIR (covers manifest loss).
+    r"""True only if the LIVE object at ``target`` is a symlink resolving inside
+    BUNDLES_DIR — i.e. watchmen still owns it right now.
+
+    Ownership is decided from disk, NOT from a manifest entry: a stale manifest
+    row can outlive the link (the user may have deleted watchmen's symlink and
+    put their own real directory there). Trusting the manifest alone would let
+    uninstall/migrate ``rmtree`` that user content. The symlink-into-BUNDLES_DIR
+    check is both sufficient and safe, and it already survives manifest loss.
+    ``links`` is kept for signature stability (callers pass the loaded manifest).
 
     Uses ``target.resolve()`` to follow the symlink rather than ``readlink()``:
     on Windows ``readlink()`` can return a ``\\?\``-prefixed path that no longer
     compares equal to ``BUNDLES_DIR.resolve()``, so the membership check would
     wrongly miss. ``resolve()`` normalizes both sides the same way."""
-    if _manifest_entry(links, target) is not None:
+    del links  # ownership is a live-disk fact, not a manifest claim
+    if not target.is_symlink():
+        return False
+    try:
+        target.resolve().relative_to(BUNDLES_DIR.resolve())
         return True
-    if target.is_symlink():
-        try:
-            resolved = target.resolve()
-            resolved.relative_to(BUNDLES_DIR.resolve())
-            return True
-        except (ValueError, OSError):
-            return False
-    return False
+    except (ValueError, OSError):
+        return False
 
 
 def _record(links: list[dict], *, slug: str, harness: str, target: Path,
@@ -350,16 +355,28 @@ def uninstall_skill(slug: str, harness: str, *, project_key: str | None = None) 
     ]
     if matches:
         removed_any = False
+        conflict = False
         last_target = Path(matches[-1]["target"])
         for link in matches:
             target = Path(link["target"])
-            if (target.exists() or target.is_symlink()) and _is_managed(target, links):
+            present = target.exists() or target.is_symlink()
+            if present and not _is_managed(target, links):
+                # The row is stale: the user replaced our link with their own
+                # content. Leave it untouched and keep the row so status stays
+                # honest — never delete what we no longer own.
+                conflict = True
+                continue
+            if present:
                 _remove_path(target)
                 removed_any = True
-            _forget(links, target)
+            _forget(links, target)  # remove our link, or clean a vanished one
         _save_manifest(links)
-        return InstallResult(slug, harness, last_target,
-                             "uninstalled" if removed_any else "not_installed")
+        if removed_any:
+            return InstallResult(slug, harness, last_target, "uninstalled")
+        if conflict:
+            return InstallResult(slug, harness, last_target, "skipped_conflict",
+                                 "target exists and was not created by watchmen")
+        return InstallResult(slug, harness, last_target, "not_installed")
 
     # No manifest entry — fall back to the global dir to honour user-made and
     # not-installed semantics.
@@ -416,9 +433,11 @@ def _global_migration_candidates(links: list[dict]) -> dict[str, tuple[str, Path
             except (OSError, ValueError):
                 continue  # not one of ours
             parts = rel.parts
-            if len(parts) < 3 or parts[1] != "skills":
+            # Exactly <project_key>/skills/<slug> — not a symlink to some
+            # sub-path inside a skill (which would mis-infer slug + source).
+            if len(parts) != 3 or parts[1] != "skills":
                 continue
-            cands[str(entry)] = (harness, entry, parts[0], parts[-1], resolved)
+            cands[str(entry)] = (harness, entry, parts[0], parts[2], resolved)
     return cands
 
 

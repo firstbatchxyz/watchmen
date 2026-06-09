@@ -262,6 +262,57 @@ def test_migrate_leaves_global_when_repo_unresolvable(env, monkeypatch):
     assert (env / "claude" / "skills" / "alpha").is_symlink()  # untouched
 
 
+def test_uninstall_preserves_user_content_at_stale_manifest_path(env):
+    """Data-safety: a stale manifest row must NOT let uninstall delete user
+    content that replaced watchmen's old symlink at the same path."""
+    _make_bundle_skill(env, "proj", "alpha")
+    [skill] = si.bundle_skills("proj")
+    si.install_skill(skill, "claude_code", project_key="proj", scope="global")
+    target = env / "claude" / "skills" / "alpha"
+    assert target.is_symlink()
+    # user swaps in their own real dir but the manifest row lingers
+    target.unlink()
+    target.mkdir()
+    (target / "SKILL.md").write_text("mine\n", encoding="utf-8")
+    res = si.uninstall_skill("alpha", "claude_code")
+    assert res.action == "skipped_conflict"
+    assert target.is_dir() and not target.is_symlink()
+    assert (target / "SKILL.md").read_text() == "mine\n"
+
+
+def test_migrate_preserves_user_content_at_stale_manifest_path(env, monkeypatch):
+    """Same guarantee under migration: user content at a manifested global path
+    is never removed."""
+    _make_bundle_skill(env, "proj", "alpha")
+    [skill] = si.bundle_skills("proj")
+    si.install_skill(skill, "claude_code", project_key="proj", scope="global")
+    target = env / "claude" / "skills" / "alpha"
+    target.unlink()
+    target.mkdir()
+    (target / "SKILL.md").write_text("mine\n", encoding="utf-8")
+    repo = env / "repo"; repo.mkdir()
+    monkeypatch.setattr(si, "_project_repo", lambda pk: repo if pk == "proj" else None)
+    si.migrate_to_project_scope()
+    # user content untouched
+    assert target.is_dir() and (target / "SKILL.md").read_text() == "mine\n"
+
+
+def test_migrate_ignores_symlink_to_skill_subpath(env, monkeypatch):
+    """The filesystem sweep only treats <key>/skills/<slug> as a candidate, not
+    a symlink pointing at a sub-path inside a skill."""
+    src = _make_bundle_skill(env, "proj", "alpha")
+    claude = env / "claude" / "skills"
+    claude.mkdir(parents=True)
+    # a stray symlink to the skill's scripts/ subdir
+    (claude / "scripts").symlink_to((src / "scripts").resolve(), target_is_directory=True)
+    repo = env / "repo"; repo.mkdir()
+    monkeypatch.setattr(si, "_project_repo", lambda pk: repo if pk == "proj" else None)
+    results = si.migrate_to_project_scope()
+    assert all(r.slug != "scripts" for r in results)
+    assert not (repo / ".claude" / "skills" / "scripts").exists()
+    assert (claude / "scripts").is_symlink()  # left alone
+
+
 def test_managed_detection_survives_manifest_loss(env):
     """A symlink pointing into BUNDLES_DIR is treated as watchmen-managed even
     if the manifest is gone — so a reinstall replaces rather than skips."""
