@@ -513,6 +513,9 @@ watchmen distill <key>           Skill mesh + merge plan for context rot
 watchmen distill <key> --stage   Stage merged drafts in _pending/
 watchmen compare <key> --bucket <skill>    Compare models on one skill bucket
 watchmen route <key> --bucket <skill>      Pick the best model each harness can use; rewrite skill for native delegation
+watchmen install <key>           Link curated skills into the project's own repo (<repo>/.claude/skills) so they show only in that repo
+watchmen install <key> --scope global      Link into the shared ~/.claude/skills instead (visible in every repo)
+watchmen install --migrate       Move existing global skill links into their origin repos
 
 # Services
 watchmen daemon run              Scheduling loop (foreground)
