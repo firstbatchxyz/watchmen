@@ -728,7 +728,9 @@ def test_switch_harness_dispatches_via_ax_when_configured(tmp_path, monkeypatch)
     assert router.exists()
     body = router.read_text(encoding="utf-8")
     # It delegates through AX to the winning harness's AX agent...
-    assert "ax exec --once --server localhost:8494 --agent codex" in body
+    assert "ax exec --server localhost:8494 --agent codex" in body
+    assert "--once" not in body                    # removed: gone from current ax exec
+    assert "< /dev/null" in body                   # headless: EOF the post-turn REPL prompt
     assert "[model] openai/gpt-5-codex" in body
     assert str(repo) in body                       # [workspace] header
     assert "<TASK>" in body                        # task placeholder
@@ -813,7 +815,9 @@ def test_codex_source_dispatches_via_ax_inline(tmp_path, monkeypatch):
     assert by_kind[("codex", "ax-dispatch")].path == ""
 
     skill_md = (skill_dir / "SKILL.md").read_text()
-    assert "ax exec --once --server localhost:8494 --agent claude-code" in skill_md
+    assert "ax exec --server localhost:8494 --agent claude-code" in skill_md
+    assert "--once" not in skill_md                # removed: gone from current ax exec
+    assert "< /dev/null" in skill_md               # headless: EOF the post-turn REPL prompt
     assert "[model] anthropic/claude-opus-4-7" in skill_md
     assert "<TASK>" in skill_md
     assert "via AX" in skill_md
