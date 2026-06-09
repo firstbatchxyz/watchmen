@@ -20,6 +20,8 @@ def env(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(si, "HARNESS_SKILL_DIRS", {"claude_code": claude, "codex": codex})
     monkeypatch.setattr(state, "STATE_DB", tmp_path / "state.db")
     state.init_db()
+    # the project's repo must exist on disk for project-scoped install to resolve
+    (tmp_path / "repo").mkdir()
     # one curated skill on disk
     sd = bundles / "proj" / "skills" / "alpha"
     sd.mkdir(parents=True)
@@ -36,21 +38,23 @@ def test_schema_has_auto_install_column(env):
 def test_maybe_auto_install_noop_when_flag_off(env):
     state.track_project("proj", str(env / "repo"))
     curate._maybe_auto_install("proj")
-    assert not (env / "claude" / "skills" / "alpha").exists()
+    assert not (env / "repo" / ".claude" / "skills" / "alpha").exists()
 
 
 def test_maybe_auto_install_installs_when_flag_on(env):
     state.track_project("proj", str(env / "repo"))
     state.update_project("proj", auto_install=1)
     curate._maybe_auto_install("proj")
-    assert (env / "claude" / "skills" / "alpha").is_symlink()
-    assert (env / "codex" / "skills" / "alpha").is_symlink()
+    # project-scoped: links land in the repo, not the global dir
+    assert (env / "repo" / ".claude" / "skills" / "alpha").is_symlink()
+    assert (env / "repo" / ".codex" / "skills" / "alpha").is_symlink()
+    assert not (env / "claude" / "skills" / "alpha").exists()
 
 
 def test_maybe_auto_install_untracked_project_noop(env):
     # No project row at all → no crash, no install.
     curate._maybe_auto_install("ghost")
-    assert not (env / "claude" / "skills" / "alpha").exists()
+    assert not (env / "repo" / ".claude" / "skills" / "alpha").exists()
 
 
 def test_settings_parse_auto_install_bool():
@@ -93,9 +97,10 @@ def test_write_changelog_force_installs_via_args(env, monkeypatch):
     args = argparse.Namespace(auto_install=True)
     curate.write_changelog(out_dir, "full curator", args)
 
-    # force=True bypasses the opt-in, so the skill must be linked into both dirs.
-    assert (env / "claude" / "skills" / "alpha").is_symlink()
-    assert (env / "codex" / "skills" / "alpha").is_symlink()
+    # force=True bypasses the opt-in, so the skill must be linked into both
+    # (project-scoped) repo dirs.
+    assert (env / "repo" / ".claude" / "skills" / "alpha").is_symlink()
+    assert (env / "repo" / ".codex" / "skills" / "alpha").is_symlink()
 
 
 def test_write_changelog_propagates_args_auto_install_flag(env, monkeypatch):
@@ -128,5 +133,5 @@ def test_write_changelog_no_install_when_flag_off(env, monkeypatch):
     out_dir = env / "bundles" / "proj"
     curate.write_changelog(out_dir, "full curator", argparse.Namespace(auto_install=False))
 
-    assert not (env / "claude" / "skills" / "alpha").exists()
-    assert not (env / "codex" / "skills" / "alpha").exists()
+    assert not (env / "repo" / ".claude" / "skills" / "alpha").exists()
+    assert not (env / "repo" / ".codex" / "skills" / "alpha").exists()

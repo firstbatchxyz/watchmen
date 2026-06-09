@@ -1505,7 +1505,11 @@ def build_parser() -> "WatchmenParser":
         "install",
         help="symlink curated skills into the agent's discovery dir (~/.claude/skills, ~/.codex/skills) so they actually load and fire",
     )
-    p_install.add_argument("project")
+    p_install.add_argument("project", nargs="?",
+                           help="project key (omit only with --migrate)")
+    p_install.add_argument("--scope", choices=["project", "global"], default="project",
+                           help="project: link into <repo>/.claude/skills so the skills show only in that repo "
+                                "(default); global: link into ~/.claude/skills, visible in every repo")
     p_install.add_argument("--skill", action="append", default=[],
                            help="only install this slug (repeatable; default: all curated skills)")
     p_install.add_argument("--harness", action="append", default=[],
@@ -1514,6 +1518,8 @@ def build_parser() -> "WatchmenParser":
                            help="overwrite a target that already exists and wasn't created by watchmen")
     p_install.add_argument("--uninstall", action="store_true",
                            help="remove watchmen-created links instead of installing")
+    p_install.add_argument("--migrate", action="store_true",
+                           help="move existing global watchmen links into their origin repos (project scope)")
     p_install.add_argument("--list", action="store_true",
                            help="show install status per skill/harness without changing anything")
     p_install.set_defaults(func=cmd_install)

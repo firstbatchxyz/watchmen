@@ -122,7 +122,7 @@ def test_unknown_harness_skipped(env):
 def test_install_project_all_harnesses(env):
     _make_bundle_skill(env, "proj", "alpha")
     _make_bundle_skill(env, "proj", "beta")
-    results = si.install_project("proj")
+    results = si.install_project("proj", scope="global")
     actions = {(r.slug, r.harness): r.action for r in results}
     assert actions[("alpha", "claude_code")] == "installed"
     assert actions[("alpha", "codex")] == "installed"
@@ -134,7 +134,7 @@ def test_install_project_all_harnesses(env):
 def test_install_project_slug_filter(env):
     _make_bundle_skill(env, "proj", "alpha")
     _make_bundle_skill(env, "proj", "beta")
-    results = si.install_project("proj", harnesses=["claude_code"], slugs=["alpha"])
+    results = si.install_project("proj", harnesses=["claude_code"], slugs=["alpha"], scope="global")
     assert {r.slug for r in results} == {"alpha"}
     assert (env / "claude" / "skills" / "alpha").is_symlink()
     assert not (env / "claude" / "skills" / "beta").exists()
@@ -162,6 +162,104 @@ def test_uninstall_refuses_user_made_target(env):
 def test_uninstall_not_installed(env):
     res = si.uninstall_skill("ghost", "claude_code")
     assert res.action == "not_installed"
+
+
+def test_project_scope_installs_into_repo(env):
+    """scope='project' links into <repo>/.claude/skills, not the global dir."""
+    _make_bundle_skill(env, "proj", "alpha")
+    [skill] = si.bundle_skills("proj")
+    repo = env / "repo"
+    repo.mkdir()
+    res = si.install_skill(skill, "claude_code", project_key="proj", scope="project", repo=repo)
+    assert res.action == "installed"
+    assert (repo / ".claude" / "skills" / "alpha").is_symlink()
+    # nothing landed in the global dir
+    assert not (env / "claude" / "skills" / "alpha").exists()
+    entry = si.installed_targets("proj")[0]
+    assert entry["scope"] == "project"
+
+
+def test_project_scope_skips_when_no_repo(env):
+    """Project scope with an unresolvable repo skips rather than silently
+    falling back to global."""
+    _make_bundle_skill(env, "proj", "alpha")
+    [skill] = si.bundle_skills("proj")
+    res = si.install_skill(skill, "claude_code", project_key="ghost", scope="project")
+    assert res.action == "skipped_no_dir"
+    assert "no resolvable repo" in res.reason
+
+
+def test_two_projects_same_slug_no_collision_under_project_scope(env):
+    """The global, bare-slug scheme let two projects' same-slug skills collide.
+    Project scope puts each in its own repo, so both survive."""
+    _make_bundle_skill(env, "proj_a", "shared")
+    _make_bundle_skill(env, "proj_b", "shared")
+    repo_a = env / "repo_a"; repo_a.mkdir()
+    repo_b = env / "repo_b"; repo_b.mkdir()
+    [a] = si.bundle_skills("proj_a")
+    [b] = si.bundle_skills("proj_b")
+    si.install_skill(a, "claude_code", project_key="proj_a", scope="project", repo=repo_a)
+    si.install_skill(b, "claude_code", project_key="proj_b", scope="project", repo=repo_b)
+    assert (repo_a / ".claude" / "skills" / "shared").resolve() == a.skill_dir.resolve()
+    assert (repo_b / ".claude" / "skills" / "shared").resolve() == b.skill_dir.resolve()
+
+
+def test_uninstall_finds_project_scoped_link(env):
+    _make_bundle_skill(env, "proj", "alpha")
+    [skill] = si.bundle_skills("proj")
+    repo = env / "repo"; repo.mkdir()
+    si.install_skill(skill, "claude_code", project_key="proj", scope="project", repo=repo)
+    res = si.uninstall_skill("alpha", "claude_code", project_key="proj")
+    assert res.action == "uninstalled"
+    assert not (repo / ".claude" / "skills" / "alpha").exists()
+    assert si.installed_targets("proj") == []
+
+
+def test_migrate_moves_global_link_into_repo(env, monkeypatch):
+    """migrate_to_project_scope() relocates an existing global link into the
+    project's repo and drops the global one."""
+    _make_bundle_skill(env, "proj", "alpha")
+    [skill] = si.bundle_skills("proj")
+    # start in the old global location
+    si.install_skill(skill, "claude_code", project_key="proj", scope="global")
+    assert (env / "claude" / "skills" / "alpha").is_symlink()
+    # make the project's repo resolvable
+    repo = env / "repo"; repo.mkdir()
+    monkeypatch.setattr(si, "_project_repo", lambda pk: repo if pk == "proj" else None)
+
+    results = si.migrate_to_project_scope()
+    assert any(r.action == "migrated" for r in results)
+    assert (repo / ".claude" / "skills" / "alpha").is_symlink()      # moved in
+    assert not (env / "claude" / "skills" / "alpha").exists()        # old gone
+    entries = si.installed_targets("proj")
+    assert len(entries) == 1 and entries[0]["scope"] == "project"
+
+
+def test_migrate_sweeps_unmanifested_global_link(env, monkeypatch):
+    """Migration is robust to manifest loss: a global symlink into BUNDLES_DIR
+    with no manifest entry is still discovered (project/slug inferred from the
+    target path) and relocated."""
+    _make_bundle_skill(env, "proj", "alpha")
+    [skill] = si.bundle_skills("proj")
+    si.install_skill(skill, "claude_code", project_key="proj", scope="global")
+    si.MANIFEST_PATH.unlink()  # wipe the manifest — link is now unrecorded
+    repo = env / "repo"; repo.mkdir()
+    monkeypatch.setattr(si, "_project_repo", lambda pk: repo if pk == "proj" else None)
+
+    results = si.migrate_to_project_scope()
+    assert any(r.action == "migrated" for r in results)
+    assert (repo / ".claude" / "skills" / "alpha").is_symlink()
+    assert not (env / "claude" / "skills" / "alpha").exists()
+
+
+def test_migrate_leaves_global_when_repo_unresolvable(env, monkeypatch):
+    _make_bundle_skill(env, "proj", "alpha")
+    [skill] = si.bundle_skills("proj")
+    si.install_skill(skill, "claude_code", project_key="proj", scope="global")
+    monkeypatch.setattr(si, "_project_repo", lambda pk: None)
+    results = si.migrate_to_project_scope()
+    assert all(r.action != "migrated" for r in results)
+    assert (env / "claude" / "skills" / "alpha").is_symlink()  # untouched
 
 
 def test_managed_detection_survives_manifest_loss(env):

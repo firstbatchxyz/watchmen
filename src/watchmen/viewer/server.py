@@ -485,7 +485,7 @@ def skill_uninstall_action(project_key: str, skill_slug: str):
     """Remove watchmen-created links for this skill from all harness dirs.
     Never touches a target watchmen didn't create."""
     for harness in wm_install.HARNESS_SKILL_DIRS:
-        wm_install.uninstall_skill(skill_slug, harness)
+        wm_install.uninstall_skill(skill_slug, harness, project_key=project_key)
     return RedirectResponse(
         url=f"/p/{project_key}/skills/{skill_slug}", status_code=303
     )
