@@ -123,14 +123,59 @@ def test_claude_credentials_skips_oauth_when_inference_scope_missing(monkeypatch
     assert not creds.has_inference_scope()
 
 
-def test_is_claude_code_available_false_on_non_darwin(monkeypatch):
-    """We only support macOS keychain reads for v0.8. Linux/Windows have
-    different credential stores; the discovery function returns False there
-    so the rest of the code degrades gracefully without OS-specific guards
-    sprinkled throughout."""
+def test_read_blob_none_when_no_source(monkeypatch):
+    """With neither a keychain entry nor a `~/.claude/.credentials.json` file
+    (both low-level readers stubbed to None by the autouse isolation fixture),
+    the composed `_read_blob()` yields None — so read() returns None and
+    availability is False, degrading gracefully. We assert the real composition
+    helper directly because the autouse fixture stubs the public
+    `is_claude_code_available` wrapper itself."""
     from watchmen.credentials import claude_code as _cc
-    monkeypatch.setattr(_cc.sys, "platform", "linux")
-    assert _cc.is_claude_code_available() is False
+    assert _cc._read_blob() is None
+
+
+def test_claude_credentials_fall_back_to_file_when_no_keychain(monkeypatch):
+    """On a host without a keychain (Linux box / server), read() sources the
+    same `claudeAiOauth` payload from `~/.claude/.credentials.json`. This is
+    the fallback that lets watchmen run on a Claude subscription off a Mac."""
+    from watchmen.credentials import claude_code as _cc
+    monkeypatch.setattr(_cc, "_read_keychain_blob", lambda: None)
+    monkeypatch.setattr(_cc, "_read_credentials_file", lambda: json.dumps({
+        "claudeAiOauth": {
+            "accessToken":      "linux-access",
+            "refreshToken":     "linux-refresh",
+            "expiresAt":        9_999_999_999_999,
+            "scopes":           ["user:inference"],
+            "subscriptionType": "max",
+            "rateLimitTier":    "default_claude_max_5x",
+        }
+    }))
+    creds = _cc.ClaudeCodeCredentials.read()
+    assert creds is not None
+    assert creds.access_token == "linux-access"
+    assert creds.subscription_type == "max"
+    assert creds.has_inference_scope()
+    assert not creds.is_expired()
+    # Composition: with the file present (keychain empty), `_read_blob()`
+    # surfaces it, so availability resolves True. (Asserted on the real
+    # helper; the autouse fixture stubs the public wrapper.)
+    assert _cc._read_blob() is not None
+
+
+def test_keychain_takes_precedence_over_file(monkeypatch):
+    """When both sources exist (a macOS box that also has the on-disk file),
+    the keychain wins — it is Claude Code's primary, freshest store."""
+    from watchmen.credentials import claude_code as _cc
+    monkeypatch.setattr(_cc, "_read_keychain_blob", lambda: json.dumps({
+        "claudeAiOauth": {"accessToken": "from-keychain", "refreshToken": "r",
+                          "expiresAt": 9_999_999_999_999, "scopes": ["user:inference"]}
+    }))
+    monkeypatch.setattr(_cc, "_read_credentials_file", lambda: json.dumps({
+        "claudeAiOauth": {"accessToken": "from-file", "refreshToken": "r",
+                          "expiresAt": 9_999_999_999_999, "scopes": ["user:inference"]}
+    }))
+    creds = _cc.ClaudeCodeCredentials.read()
+    assert creds.access_token == "from-keychain"
 
 
 # ─── CodexCredentials ──────────────────────────────────────────────────────

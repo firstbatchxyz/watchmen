@@ -6,6 +6,16 @@ never silent. Format loosely follows [Keep a Changelog](https://keepachangelog.c
 
 ## [Unreleased]
 
+### Added — Claude subscription auth on Linux (credential file fallback)
+
+- `credentials.claude_code` now reads the Claude Code OAuth token from
+  `~/.claude/.credentials.json` when the macOS keychain yields nothing, so the
+  `claude-pro` provider (subscription-quota billing) works on Linux boxes and
+  servers, not just macOS. macOS is unchanged: keychain first, file as fallback.
+- `is_claude_code_available()` and `ClaudeCodeCredentials.read()` resolve a
+  credential from either source and return None/False only when neither is
+  present. The reader never raises and never logs the token contents.
+
 ### Added — Iterative skill routing with watchmen-driven improvement
 
 - New `watchmen route <project> --bucket <skill>` reads the corpus to find
