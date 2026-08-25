@@ -76,6 +76,25 @@ def test_install_records_manifest(env):
     assert entries[0]["harness"] == "claude_code"
 
 
+def test_installed_bundle_skills_requires_live_agent_link(env):
+    _make_bundle_skill(env, "proj", "alpha")
+    assert si.installed_bundle_skills("proj") == []
+
+    [skill] = si.bundle_skills("proj")
+    si.install_skill(skill, "claude_code", project_key="proj")
+    assert [s.slug for s in si.installed_bundle_skills("proj")] == ["alpha"]
+
+
+def test_installed_bundle_skills_ignores_stale_manifest(env):
+    _make_bundle_skill(env, "proj", "alpha")
+    [skill] = si.bundle_skills("proj")
+    result = si.install_skill(skill, "claude_code", project_key="proj")
+    result.target.unlink()
+
+    assert si.installed_targets("proj")  # stale audit record still exists
+    assert si.installed_bundle_skills("proj") == []
+
+
 def test_reinstall_replaces_watchmen_managed_target(env):
     _make_bundle_skill(env, "proj", "alpha")
     [skill] = si.bundle_skills("proj")

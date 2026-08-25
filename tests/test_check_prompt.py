@@ -61,10 +61,9 @@ def hook(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "PROJECTS_INDEX", projects)
     monkeypatch.setattr(mod, "STATE_DIR", state)
     monkeypatch.setattr(mod, "SUGGESTIONS_LOG", watchmen / "suggestions.jsonl")
-    # A one-row FTS5 table yields bm25 scores near 0 (IDF collapses on a tiny
-    # corpus); the real 136-skill index scores well below -0.5. Use a permissive
-    # bar here so the dedup tests exercise the dedup, not threshold calibration.
-    # The threshold-specific test overrides this back to a strict value.
+    # Keep these tests independent from corpus-size-sensitive BM25 values so
+    # they exercise dedup and lexical gates. The threshold-specific test below
+    # overrides this with a deliberately strict value.
     monkeypatch.setattr(mod, "SCORE_THRESHOLD", 1.0)
 
     mod._repo = repo  # convenience for tests
@@ -149,6 +148,39 @@ def test_threshold_env_configurable(hook, monkeypatch):
     monkeypatch.setattr(hook, "SCORE_THRESHOLD", -1000.0)
     rc = _run(hook, monkeypatch, "deploy provision railway stack", "s1")
     assert rc == 0
+    assert _suggestion(hook) is None
+    assert _log_lines(hook) == []
+
+
+def test_single_shared_trigger_word_is_not_enough(hook, monkeypatch):
+    """Generic vocabulary such as 'deploy' must not produce a suggestion by itself."""
+    _run(hook, monkeypatch, "deploy this", "s1")
+    assert _suggestion(hook) is None
+    assert _log_lines(hook) == []
+
+
+def test_when_not_to_use_terms_exclude_match(hook, monkeypatch):
+    """A prompt matching an explicit negative trigger must be rejected."""
+    with sqlite3.connect(str(hook.INDEX_DB)) as conn:
+        conn.execute(
+            "UPDATE skill_match SET when_not_to_use = ? WHERE skill_slug = ?",
+            ("preview environment deployment", "railway-stack-provision"),
+        )
+        conn.commit()
+    _run(hook, monkeypatch, "deploy the railway preview environment", "s1")
+    assert _suggestion(hook) is None
+    assert _log_lines(hook) == []
+
+
+def test_negative_trigger_column_cannot_create_a_match(hook, monkeypatch):
+    """FTS retrieval is scoped to when_to_use, never the negative examples."""
+    with sqlite3.connect(str(hook.INDEX_DB)) as conn:
+        conn.execute(
+            "UPDATE skill_match SET when_not_to_use = ? WHERE skill_slug = ?",
+            ("capital france geography question", "railway-stack-provision"),
+        )
+        conn.commit()
+    _run(hook, monkeypatch, "capital france geography question", "s1")
     assert _suggestion(hook) is None
     assert _log_lines(hook) == []
 

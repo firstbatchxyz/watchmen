@@ -475,6 +475,7 @@ def skill_install_action(project_key: str, skill_slug: str):
     can load it. Skips harnesses where a non-watchmen target already exists."""
     _skill_or_404(project_key, skill_slug)
     wm_install.install_project(project_key, slugs=[skill_slug])
+    wm_install.refresh_skill_index()
     return RedirectResponse(
         url=f"/p/{project_key}/skills/{skill_slug}", status_code=303
     )
@@ -486,6 +487,7 @@ def skill_uninstall_action(project_key: str, skill_slug: str):
     Never touches a target watchmen didn't create."""
     for harness in wm_install.HARNESS_SKILL_DIRS:
         wm_install.uninstall_skill(skill_slug, harness, project_key=project_key)
+    wm_install.refresh_skill_index()
     return RedirectResponse(
         url=f"/p/{project_key}/skills/{skill_slug}", status_code=303
     )

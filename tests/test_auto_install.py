@@ -124,6 +124,20 @@ def test_write_changelog_propagates_args_auto_install_flag(env, monkeypatch):
     assert seen == {"project_key": "proj", "force": True}
 
 
+def test_write_changelog_installs_before_rebuilding_index(env, monkeypatch):
+    """The index may only include installed skills, so ordering is functional."""
+    monkeypatch.setattr(curate, "_git_commit_artifacts", lambda **k: None)
+    monkeypatch.setattr(curate, "_publish_watchmen_state", lambda **k: None)
+    events = []
+    monkeypatch.setattr(curate, "_maybe_auto_install", lambda *a, **k: events.append("install"))
+    monkeypatch.setattr(curate, "_build_skill_index", lambda: events.append("index"))
+
+    out_dir = env / "bundles" / "proj"
+    curate.write_changelog(out_dir, "full curator", argparse.Namespace(auto_install=True))
+
+    assert events == ["install", "index"]
+
+
 def test_write_changelog_no_install_when_flag_off(env, monkeypatch):
     """Without --auto-install and with the project opt-in off, write_changelog
     must NOT install anything (the force value is honestly False)."""

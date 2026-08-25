@@ -298,11 +298,15 @@ Default cadence:
 |---|---|
 | Re-ingest all coding-agent transcripts + incremental analyst | Every **2 hours** |
 | `CLAUDE.md` regen (light) | After an analyst run if last regen >24h ago |
-| **Full curator** (skill bundles + CLAUDE.md, expensive) | **02:00 and 14:00 local**, min 8h between runs per project |
+| **Full curator** (skill bundles + CLAUDE.md, expensive) | Manual via `watchmen curate <project>` |
+
+Full curation is deliberately manual by default because it creates durable
+agent behavior and needs review. Advanced users can opt into scheduled runs
+with `watchmen daemon run --curator-hours 2,14`.
 
 ## Steering the curator
 
-Autonomous by default. When you want override:
+Review-first by default. When you want to steer the output:
 
 - **`watchmen pin <project> <skill>`** — hand-edited a SKILL.md and want it preserved. Curator treats pinned skills as forced cache hits.
 - **`watchmen drop <project> <skill>`** — keeps proposing a skill you don't want. Drop removes the bundle AND adds the slug to `_blocklist.json`. Stays gone.
