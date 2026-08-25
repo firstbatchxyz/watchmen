@@ -14,10 +14,20 @@ developer last configured. Pinning here means tests behave the same in
 CI, on a fresh checkout, and on a machine with multiple keys configured.
 """
 
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
+
+# Set this before any watchmen module is imported during test collection.
+# Runtime paths such as STATE_DB are intentionally resolved at import time, so
+# per-test Path.home()/environment monkeypatches are too late to protect the
+# developer's real ~/.watchmen data. TemporaryDirectory keeps the directory
+# alive for the whole pytest process and removes it when the interpreter exits.
+_TEST_WATCHMEN_HOME = tempfile.TemporaryDirectory(prefix="watchmen-pytest-")
+os.environ["WATCHMEN_HOME"] = _TEST_WATCHMEN_HOME.name
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "watchmen"

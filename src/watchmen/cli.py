@@ -1147,7 +1147,11 @@ def _add_daemon_run_args(p) -> None:
     p.add_argument("--once", action="store_true", help="single cycle then exit")
     p.add_argument("--interval", type=int, default=7200, help="seconds between analyst cycles (default 7200 = 2h)")
     p.add_argument("--curator-age", type=int, default=86400)
-    p.add_argument("--curator-hours", default="2,14", help="local-time hours when full curator runs (default '2,14' = 2am + 2pm)")
+    p.add_argument(
+        "--curator-hours",
+        default="",
+        help="optional local-time hours for full skill curation, e.g. '2,14' (disabled by default)",
+    )
     p.add_argument("--full-curator-min-age", type=int, default=28800, help="min seconds between full curator runs per project (default 8h)")
     p.add_argument("--model", default=DEFAULT_MODEL())
     from watchmen.daemon import DEFAULT_LOG as _DAEMON_DEFAULT_LOG

@@ -482,6 +482,43 @@ def installed_targets(project_key: str | None = None) -> list[dict]:
     return [link for link in links if link.get("project_key") == project_key]
 
 
+def installed_bundle_skills(project_key: str, *, repo: Path | None = None) -> list[BundleSkill]:
+    """Return bundle skills that are live in at least one agent discovery dir.
+
+    This checks the filesystem rather than trusting the manifest: a stale
+    manifest must not make an unavailable skill suggestible, while an older
+    watchmen symlink should still count even if its manifest was lost.
+    """
+    project_repo = repo if repo is not None else _project_repo(project_key)
+    installed: list[BundleSkill] = []
+    for skill in bundle_skills(project_key):
+        source = skill.skill_dir.resolve()
+        bases = list(HARNESS_SKILL_DIRS.values())
+        if project_repo is not None:
+            bases.extend(
+                Path(project_repo) / subdir / "skills"
+                for subdir in _HARNESS_SUBDIR.values()
+            )
+        for base in bases:
+            target = base / skill.slug
+            if not target.is_symlink():
+                continue
+            try:
+                if target.resolve() == source:
+                    installed.append(skill)
+                    break
+            except OSError:
+                continue
+    return installed
+
+
+def refresh_skill_index() -> None:
+    """Rebuild the suggestion index after install state changes."""
+    from watchmen.curate import _build_skill_index
+
+    _build_skill_index()
+
+
 def _remove_path(target: Path) -> None:
     """Unlink a symlink or remove a directory/file target."""
     if target.is_symlink() or target.is_file():

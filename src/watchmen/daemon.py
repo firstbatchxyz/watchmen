@@ -38,7 +38,10 @@ from watchmen.util import classify_run_failure
 ROOT = Path(__file__).parent
 DEFAULT_INTERVAL = 7200       # 2 hours between analyst checks
 DEFAULT_CURATOR_AGE = 86400   # 24 h — minimum age before stage 3 regen is allowed
-DEFAULT_FULL_CURATOR_HOURS = "2,14"  # full curator runs at 02:00 and 14:00 daily
+# Full skill generation is expensive, accumulates durable agent behavior, and
+# needs review. Keep scheduling as an explicit opt-in for existing power users,
+# but do not run it unattended by default.
+DEFAULT_FULL_CURATOR_HOURS = ""
 DEFAULT_FULL_CURATOR_MIN_AGE = 28800  # min 8 h between full curator runs per project
 def _default_model() -> str:
     """Daemon default model — pulled from active provider so the scheduled
@@ -242,7 +245,7 @@ def cycle_once(
         skills_dir = BUNDLES_DIR / key / "skills"
         has_bundles = skills_dir.exists() and any(d.is_dir() for d in skills_dir.iterdir())
 
-        # Scheduled full curator (twice a day by default) — full pipeline incl. skill bundles
+        # Optional scheduled full curator — disabled unless --curator-hours is set.
         if _should_run_full_curator(local_now, _parse_iso(p.get("last_curator_run")) and
                                     _parse_iso(p.get("last_curator_run")).replace(tzinfo=None),
                                     scheduled_curator_hours, full_curator_min_age):
@@ -258,7 +261,7 @@ def cycle_once(
         if analyst_ran and has_bundles and too_old:
             _regen_claude_md(key, model, log)
         elif analyst_ran and not has_bundles:
-            log.info("[%s] no skill bundles yet — wait for next scheduled full curator window", key)
+            log.info("[%s] no skill bundles yet — run `watchmen curate %s` when ready", key, key)
 
     log.info("─── cycle end ───\n")
 
@@ -306,7 +309,11 @@ def main():
     parser.add_argument("--once", action="store_true", help="run one cycle and exit (testing)")
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL, help=f"seconds between cycles (default {DEFAULT_INTERVAL} = {DEFAULT_INTERVAL//3600}h)")
     parser.add_argument("--curator-age", type=int, default=DEFAULT_CURATOR_AGE, help="stage-3 regen allowed only if last CLAUDE.md is older than this (default 24h)")
-    parser.add_argument("--curator-hours", default=DEFAULT_FULL_CURATOR_HOURS, help=f"local-time hours when full curator runs (default '{DEFAULT_FULL_CURATOR_HOURS}')")
+    parser.add_argument(
+        "--curator-hours",
+        default=DEFAULT_FULL_CURATOR_HOURS,
+        help="optional local-time hours for full skill curation, e.g. '2,14' (disabled by default)",
+    )
     parser.add_argument("--full-curator-min-age", type=int, default=DEFAULT_FULL_CURATOR_MIN_AGE, help=f"minimum seconds between full curator runs per project (default {DEFAULT_FULL_CURATOR_MIN_AGE} = {DEFAULT_FULL_CURATOR_MIN_AGE//3600}h)")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--log-file", default=str(DEFAULT_LOG))

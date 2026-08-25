@@ -20,6 +20,7 @@ def env(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(si, "BUNDLES_DIR", bundles)
     monkeypatch.setattr(si, "MANIFEST_PATH", tmp_path / "install_manifest.json")
     monkeypatch.setattr(si, "HARNESS_SKILL_DIRS", {"claude_code": claude, "codex": codex})
+    monkeypatch.setattr(si, "refresh_skill_index", lambda: None)
     return tmp_path
 
 
@@ -62,6 +63,17 @@ def test_install_slug_and_harness_filter(env):
     assert (env / "claude" / "skills" / "alpha").is_symlink()
     assert not (env / "codex" / "skills" / "alpha").exists()
     assert not (env / "claude" / "skills" / "beta").exists()
+
+
+def test_install_and_uninstall_refresh_suggestion_index(env, monkeypatch):
+    _bundle(env, "proj", "alpha")
+    refreshes = []
+    monkeypatch.setattr(si, "refresh_skill_index", lambda: refreshes.append("refresh"))
+
+    assert cmd.cmd_install(_args("proj")) == 0
+    assert refreshes == ["refresh"]
+    assert cmd.cmd_install(_args("proj", uninstall=True)) == 0
+    assert refreshes == ["refresh", "refresh"]
 
 
 def test_install_conflict_skipped_message(env, capsys):

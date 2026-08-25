@@ -43,7 +43,7 @@ import httpx
 
 from watchmen.agent import Agent, load_api_key
 from watchmen.cache import ReadRecorder, cache_hit, invalidate_all, wrap_handlers
-from watchmen.paths import BUNDLES_DIR
+from watchmen.paths import BUNDLES_DIR, WATCHMEN_HOME
 from watchmen.tools_lib import make_tools
 
 ROOT = Path(__file__).parent
@@ -817,19 +817,19 @@ def write_changelog(out_dir: Path, run_kind: str, args) -> None:
     except Exception as e:
         print(f"      _publish_watchmen_state failed (non-fatal): {type(e).__name__}: {e}", flush=True)
 
-    # Rebuild the FTS5 skill index. Plugin's UserPromptSubmit hook queries this
-    # to surface "you could have used /<skill>" suggestions.
-    try:
-        _build_skill_index()
-    except Exception as e:
-        print(f"      _build_skill_index failed (non-fatal): {type(e).__name__}: {e}", flush=True)
-
-    # When the project opted in OR --auto-install is passed, symlink the freshly
-    # curated skills into the agent discovery dirs so they fire without manual install.
+    # Install first: the suggestion index deliberately contains only skills an
+    # agent can actually load.
     try:
         _maybe_auto_install(out_dir.name, force=args.auto_install)
     except Exception as e:
         print(f"      auto-install failed (non-fatal): {type(e).__name__}: {e}", flush=True)
+
+    # Rebuild after the optional install so newly linked skills are immediately
+    # suggestible and uninstalled bundles remain absent.
+    try:
+        _build_skill_index()
+    except Exception as e:
+        print(f"      _build_skill_index failed (non-fatal): {type(e).__name__}: {e}", flush=True)
 
 
 def _git_commit_artifacts(
@@ -916,8 +916,9 @@ def _extract_frontmatter_field(fm: str, field: str) -> str:
 
 
 def _build_skill_index() -> None:
-    """Rebuild ~/.watchmen/skill_index.db (FTS5) from every tracked project's skill
-    bundles. The plugin's UserPromptSubmit hook queries this to surface
+    """Rebuild the FTS5 index from skills installed in an agent discovery dir.
+
+    The plugin's UserPromptSubmit hook queries this to surface
     'you could have used /<skill> to save time & tokens' indicators.
 
     Two concurrent curator runs would race here (DROP + CREATE + INSERT
@@ -925,8 +926,9 @@ def _build_skill_index() -> None:
     rebuild serial across the host. Also wraps the SQL in BEGIN/COMMIT so
     a reader during the rebuild sees the old index until the swap.
     """
+    from watchmen import skill_install
     from watchmen import state as _state
-    base = Path.home() / ".watchmen"
+    base = WATCHMEN_HOME
     base.mkdir(parents=True, exist_ok=True)
     db_path = base / "skill_index.db"
     lock_path = base / "skill_index.db.lock"
@@ -936,15 +938,11 @@ def _build_skill_index() -> None:
         project_key = p.get("project_key")
         if not project_key:
             continue
-        skills_dir = BUNDLES_DIR / project_key / "skills"
-        if not skills_dir.exists():
-            continue
-        for skill_dir in skills_dir.iterdir():
-            if not skill_dir.is_dir():
-                continue
-            skill_md = skill_dir / "SKILL.md"
-            if not skill_md.exists():
-                continue
+        source_repo = p.get("source_repo")
+        repo = Path(source_repo).expanduser() if source_repo else None
+        for skill in skill_install.installed_bundle_skills(project_key, repo=repo):
+            skill_dir = skill.skill_dir
+            skill_md = skill.source_md
             content = skill_md.read_text(errors="replace")
             m = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
             fm = m.group(1) if m else ""
@@ -973,7 +971,7 @@ def _build_skill_index() -> None:
             rows,
         )
         conn.execute("COMMIT")
-    print(f"      indexed {len(rows)} skill(s) across projects → {db_path}", flush=True)
+    print(f"      indexed {len(rows)} installed skill(s) across projects → {db_path}", flush=True)
 
 
 def _publish_watchmen_state(

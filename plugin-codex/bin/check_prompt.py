@@ -42,10 +42,17 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# BM25 returns negative numbers; more negative = more relevant. -0.5 keeps the
-# bar fairly high. Tunable without a code change as we calibrate against real
-# false positives (a stricter bar is just a more-negative number).
-SCORE_THRESHOLD = _env_float("WATCHMEN_SUGGEST_THRESHOLD", -0.5)
+# BM25 is useful for ordering candidates, but its absolute score changes with
+# corpus size. Default to accepting ranked FTS candidates and let the explicit
+# positive/negative overlap gates below control precision. Advanced users can
+# still set a more-negative threshold if they have calibrated their own index.
+SCORE_THRESHOLD = _env_float("WATCHMEN_SUGGEST_THRESHOLD", 0.0)
+
+# A single shared word is not enough evidence to interrupt the user with a
+# skill suggestion. Two distinct trigger terms is a conservative baseline;
+# projects that need a different trade-off can tune it without reinstalling.
+MIN_TRIGGER_OVERLAP = _env_int("WATCHMEN_SUGGEST_MIN_TRIGGER_OVERLAP", 2)
+MIN_NEGATIVE_OVERLAP = _env_int("WATCHMEN_SUGGEST_MIN_NEGATIVE_OVERLAP", 2)
 
 # Anti-firehose: the hook fires on every prompt, so without a memory the same
 # skill gets re-suggested dozens of times per session (observed: one skill
@@ -108,6 +115,25 @@ def sanitize_fts_query(text: str) -> str:
         return ""
     # FTS5 escape: quote each token to disable operator parsing.
     return " OR ".join(f'"{t}"' for t in keep[:20])
+
+
+def _match_tokens(text: str) -> set[str]:
+    """Normalized lexical tokens used for the precision gates after FTS."""
+    return {
+        token.lower()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", text or "")
+        if token.lower() not in STOP_WORDS
+    }
+
+
+def _eligible_match(prompt: str, when_to_use: str, when_not_to_use: str) -> bool:
+    """Require positive evidence and reject explicit negative-trigger overlap."""
+    prompt_tokens = _match_tokens(prompt)
+    positive_overlap = prompt_tokens & _match_tokens(when_to_use)
+    if len(positive_overlap) < MIN_TRIGGER_OVERLAP:
+        return False
+    negative_overlap = prompt_tokens & _match_tokens(when_not_to_use)
+    return len(negative_overlap) < MIN_NEGATIVE_OVERLAP
 
 
 def write_suggestion(project_key: str, suggestion: dict | None) -> None:
@@ -206,24 +232,32 @@ def main() -> int:
 
     try:
         with sqlite3.connect(str(INDEX_DB)) as conn:
-            row = conn.execute(
-                "SELECT skill_slug, bm25(skill_match) AS score "
+            rows = conn.execute(
+                "SELECT skill_slug, bm25(skill_match) AS score, "
+                "when_to_use, when_not_to_use "
                 "FROM skill_match "
-                "WHERE skill_match MATCH ? AND project_key = ? "
-                "ORDER BY score LIMIT 1",
+                "WHERE when_to_use MATCH ? AND project_key = ? "
+                "ORDER BY score LIMIT 8",
                 (query, project_key),
-            ).fetchone()
+            ).fetchall()
     except sqlite3.Error:
         return 0
 
-    if not row:
+    row = next(
+        (
+            candidate
+            for candidate in rows
+            if candidate[1] is not None
+            and candidate[1] <= SCORE_THRESHOLD
+            and _eligible_match(prompt, candidate[2] or "", candidate[3] or "")
+        ),
+        None,
+    )
+    if row is None:
         write_suggestion(project_key, None)
         return 0
 
-    skill_slug, score = row
-    if score is None or score > SCORE_THRESHOLD:
-        write_suggestion(project_key, None)
-        return 0
+    skill_slug, score, _when_to_use, _when_not_to_use = row
 
     # Anti-firehose: if we've already surfaced this skill (this session, or
     # within the cooldown), stay silent rather than re-asserting it every

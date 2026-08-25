@@ -79,6 +79,8 @@ def cmd_install(args) -> int:
         # Repo-local links live in the working tree. We never edit .gitignore —
         # that's the user's call — but it's worth a one-line heads-up.
         print(dim("  tip: these live in <repo>/.claude/skills — add it to .gitignore if you'd rather not track the symlinks"))
+    if changed:
+        si.refresh_skill_index()
     return 0
 
 
@@ -95,6 +97,8 @@ def _run_migrate() -> int:
         print(f"  {_style(r.action, r.action):<24} {r.slug}  {dim('→')} {r.harness}  {dim(target)}{note}")
     print()
     print(f"{green(str(moved))} moved into their repos")
+    if moved:
+        si.refresh_skill_index()
     return 0
 
 
@@ -112,6 +116,8 @@ def _run_uninstall(project, skills, slugs, harnesses) -> int:
                 print(f"  {_style(res.action, res.action):<24} {slug}  {dim('→')} {harness}")
     print()
     print(f"{green(str(removed))} removed")
+    if removed:
+        si.refresh_skill_index()
     return 0
 
 

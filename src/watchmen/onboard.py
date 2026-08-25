@@ -553,7 +553,7 @@ def show_summary(console: Console) -> None:
         f"  [bold link]{viewer_url}[/]\n\n"
         f"What runs from here:\n"
         f"  • [bold]every 2h[/] — incremental analyst checks for new prompts\n"
-        f"  • [bold]02:00 + 14:00 local[/] — full curator refresh\n"
+        f"  • [bold]when you choose[/] — `watchmen curate <project>` proposes skill updates\n"
         f"  • [bold]on each curator run[/] — plugin state updates, statusLine indicator activates\n\n"
         f"[dim]Tail the daemon log: tail -f ~/Library/Logs/watchmen.log (or kai-mac.log on legacy)[/]"
     )
