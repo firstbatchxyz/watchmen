@@ -73,6 +73,12 @@ def _isolate_oauth_credentials(monkeypatch):
         return  # Pre-OAuth branch / installs without the credentials module
     monkeypatch.setattr(_cc, "is_claude_code_available", lambda: False)
     monkeypatch.setattr(_cc, "_read_keychain_blob", lambda: None)
+    # The on-disk path lookup — the Linux/server fallback (and macOS fallback)
+    # that reads `~/.claude/.credentials.json`. Without this stub, read() would
+    # pick up a real credentials file on a dev box / CI runner that happens to
+    # have one (this is exactly how the suite breaks on a machine where the dev
+    # is signed in to Claude Code) and isolation would leak.
+    monkeypatch.setattr(_cc, "_read_credentials_file", lambda: None)
     # For Codex, the read() helper resolves Path.home() each call. Tests
     # that need a clean slate should monkeypatch Path.home() to a tmp dir
     # — much easier than stubbing the read method outright. We don't add

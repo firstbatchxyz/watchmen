@@ -21,22 +21,34 @@ request header, this token can be used to call api.anthropic.com directly
 — traffic is billed against the user's Claude subscription quota rather
 than per-token API credits. This is the whole point of the integration.
 
-Linux + Windows store credentials differently (libsecret / dconf /
-DPAPI). They're out of scope for v0.7; `is_claude_code_available()`
-returns False on those platforms so the rest of the code degrades
-gracefully without OS-specific guards everywhere.
+On macOS the credential lives in the keychain (read via `security`). On
+Linux (and any non-macOS host) Claude Code writes the same `claudeAiOauth`
+payload to `~/.claude/.credentials.json` (mode 0600); we read that file as a
+fallback so watchmen can run on a Claude subscription from a Linux box or
+server, not just a Mac. macOS still prefers the keychain and falls back to
+the file if the keychain has no entry. Windows libsecret/DPAPI stores remain
+out of scope; when neither source yields a blob, `read()` returns None and
+`is_claude_code_available()` returns False so the rest of the code degrades
+gracefully.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 
 _KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+
+def _credentials_file() -> Path:
+    """On-disk credential location used on non-macOS hosts (and as a macOS
+    fallback). Resolved per call so tests can monkeypatch `Path.home()` /
+    this helper to point at a fixture file."""
+    return Path.home() / ".claude" / ".credentials.json"
 
 
 @dataclass(frozen=True)
@@ -62,17 +74,15 @@ class ClaudeCodeCredentials:
         """Pull the current credential from the keychain.
 
         Returns None if:
-        - we're not on macOS
-        - Claude Code isn't installed (no keychain entry)
-        - the entry exists but doesn't have a `claudeAiOauth` block
+        - no credential source is available (no keychain entry on macOS,
+          no `~/.claude/.credentials.json` on other hosts)
+        - the blob exists but doesn't have a `claudeAiOauth` block
           (corrupt / legacy / unexpected schema — bail rather than guess)
 
         Never raises. Callers that need to distinguish "unavailable" from
         "available but expired" should chain a `.is_expired()` check.
         """
-        if not is_claude_code_available():
-            return None
-        raw = _read_keychain_blob()
+        raw = _read_blob()
         if raw is None:
             return None
         try:
@@ -115,15 +125,40 @@ class ClaudeCodeCredentials:
 
 
 def is_claude_code_available() -> bool:
-    """True iff we're on a platform where reading Claude Code's
-    credential store is supported (macOS + the keychain has the entry).
+    """True iff a Claude Code credential blob is readable from any supported
+    source — the macOS keychain or the `~/.claude/.credentials.json` file.
 
-    Cheap to call — checks platform first, then probes keychain in a
-    single subprocess invocation. Used by onboard / settings UI to decide
-    whether to surface the "use your Claude subscription" option."""
-    if sys.platform != "darwin":
-        return False
-    return _read_keychain_blob() is not None
+    Cheap to call — the keychain probe is one subprocess invocation that
+    no-ops instantly on hosts without `security`, and the file check is a
+    single read. Used by onboard / settings UI to decide whether to surface
+    the "use your Claude subscription" option."""
+    return _read_blob() is not None
+
+
+def _read_blob() -> str | None:
+    """Return the raw credential JSON from the best available source.
+
+    Tries the macOS keychain first (a fast no-op on hosts without the
+    `security` binary, e.g. Linux), then falls back to the on-disk
+    `~/.claude/.credentials.json` file. Returns None when neither yields a
+    blob. Keeping the keychain call unconditional (rather than gating on
+    `sys.platform`) means a single code path serves macOS and Linux and lets
+    tests stub either source independently."""
+    blob = _read_keychain_blob()
+    if blob is not None:
+        return blob
+    return _read_credentials_file()
+
+
+def _read_credentials_file() -> str | None:
+    """Read `~/.claude/.credentials.json`, the non-macOS credential store
+    (and macOS fallback). Returns the file text, or None on any error
+    (missing file, unreadable). Never raises and never logs the contents —
+    the blob holds a live OAuth token."""
+    try:
+        return _credentials_file().read_text(encoding="utf-8") or None
+    except OSError:
+        return None
 
 
 def _read_keychain_blob() -> str | None:
