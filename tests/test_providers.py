@@ -170,15 +170,89 @@ def test_openai_headers_minimal():
 # ─── Anthropic: Messages API translation ───────────────────────────────────
 
 
-def test_anthropic_headers_use_x_api_key():
+def test_anthropic_headers_use_x_api_key(monkeypatch):
     """Anthropic uses `x-api-key`, not `Authorization: Bearer`. Getting this
     wrong is the single most common source of 401s when migrating between
-    providers — explicit test so a regression here can't slip through."""
+    providers — explicit test so a regression here can't slip through.
+
+    Must explicitly clear ANTHROPIC_AUTH_TOKEN because the env-contaminated
+    path (Claude Code / proxies that use bearer auth) would otherwise flip
+    the header scheme under the test's nose."""
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     prov = providers.get_provider("anthropic")
     h = prov.headers("sk-ant-test")
     assert h["x-api-key"] == "sk-ant-test"
     assert h["anthropic-version"] == "2023-06-01"
     assert "Authorization" not in h
+
+
+def test_anthropic_endpoint_defaults_to_api_anthropic_com(monkeypatch):
+    """Without ANTHROPIC_BASE_URL, the endpoint is the official Messages API.
+    Backward compat for existing installs — no behavior change unless the
+    user opts in via env."""
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    prov = providers.get_provider("anthropic")
+    assert prov.endpoint == "https://api.anthropic.com/v1/messages"
+
+
+def test_anthropic_endpoint_honors_base_url_env(monkeypatch):
+    """ANTHROPIC_BASE_URL redirects the Messages API to an Anthropic-
+    compatible proxy (z.ai, Bedrock reverse-proxy, internal gateway).
+    Trailing slashes are tolerated so users can paste a base either way.
+    Mirrors the official anthropic SDK's env-var contract — same env that
+    drives Claude Code drives watchmen."""
+    prov = providers.get_provider("anthropic")
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic")
+    assert prov.endpoint == "https://api.z.ai/api/anthropic/v1/messages"
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://proxy.example.com/anthropic/")
+    assert prov.endpoint == "https://proxy.example.com/anthropic/v1/messages"
+
+
+def test_anthropic_headers_use_bearer_when_auth_token_set(monkeypatch):
+    """ANTHROPIC_AUTH_TOKEN flips the auth scheme to Bearer, matching Claude
+    Code's env semantics. Required for proxies that mint their own bearer
+    tokens (z.ai, OAuth bridges) and reject x-api-key."""
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok_xxx")
+    prov = providers.get_provider("anthropic")
+    h = prov.headers("ignored-sk-ant-key")
+    assert h["Authorization"] == "Bearer tok_xxx"
+    assert "x-api-key" not in h
+    assert h["anthropic-version"] == "2023-06-01"
+
+
+def test_anthropic_probe_hits_env_base_url(monkeypatch):
+    """probe() must honor the same env override as endpoint(), otherwise
+    `watchmen settings api-key --check` would always hit api.anthropic.com
+    and report the proxy token as invalid."""
+    import httpx
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://proxy.example.com")
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+
+    captured: dict = {}
+
+    class _FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "stub-model"}]}
+
+    def fake_get(url, headers=None, timeout=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        return _FakeResponse()
+
+    # Patch the get() attribute on the real httpx module — probe() does
+    # `import httpx` inline, so this is the attribute it will read.
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    prov = providers.get_provider("anthropic")
+    result = prov.probe("sk-ant-test")
+    assert result.ok is True
+    assert captured["url"] == "https://proxy.example.com/v1/models"
+    assert captured["headers"]["x-api-key"] == "sk-ant-test"
 
 
 def test_anthropic_request_lifts_system_to_top_level():

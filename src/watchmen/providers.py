@@ -30,6 +30,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from watchmen import config
+
 
 PROVIDER_NAMES = ("openrouter", "openai", "anthropic", "claude-pro", "chatgpt")
 
@@ -291,7 +293,14 @@ class OpenAIProvider(Provider):
 
 class AnthropicProvider(Provider):
     name = "anthropic"
-    endpoint = "https://api.anthropic.com/v1/messages"
+    # Base URL for the Messages API. Override at runtime with
+    # `ANTHROPIC_BASE_URL` to point watchmen at an Anthropic-compatible
+    # proxy (z.ai, AWS Bedrock reverse-proxy, Azure Anthropic, internal
+    # gateways). Mirrors the official anthropic SDK's env-var contract so
+    # the same env that drives `claude` / Claude Code drives watchmen.
+    # Format: scheme + host (+ optional path), no trailing slash. We append
+    # `/v1/messages` (and `/v1/models` for probe) on top.
+    DEFAULT_BASE_URL = "https://api.anthropic.com"
     default_model = "claude-haiku-4-5-20251001"
     quota_label = "Anthropic API credits"
     # Cap on output tokens per turn — Anthropic requires this field, OpenAI
@@ -299,12 +308,43 @@ class AnthropicProvider(Provider):
     # less can rely on the model stopping early.
     _max_tokens_per_turn = 8192
 
+    @property
+    def endpoint(self) -> str:
+        """Messages API URL — honors `ANTHROPIC_BASE_URL` env override.
+
+        Falls back to the official Anthropic endpoint when unset, so
+        existing installs see no behavior change.
+        """
+        base = self._effective_base_url()
+        return f"{base}/v1/messages"
+
+    @classmethod
+    def _effective_base_url(cls) -> str:
+        raw = config.read_env_var("ANTHROPIC_BASE_URL") or cls.DEFAULT_BASE_URL
+        return raw.rstrip("/")
+
+    @staticmethod
+    def _auth_token() -> str | None:
+        """Optional bearer token. When set, overrides `x-api-key` auth.
+
+        Some Anthropic-compatible proxies (and Claude Code's own OAuth flow)
+        authenticate via `Authorization: Bearer <token>` instead of the
+        SDK's `x-api-key`. Setting `ANTHROPIC_AUTH_TOKEN` switches us to
+        the bearer scheme, matching Claude Code's env handling.
+        """
+        return config.read_env_var("ANTHROPIC_AUTH_TOKEN")
+
     def headers(self, api_key: str, *, agent_name: str = "") -> dict[str, str]:
-        return {
-            "x-api-key": api_key,
+        h = {
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
+        token = self._auth_token()
+        if token:
+            h["Authorization"] = f"Bearer {token}"
+        else:
+            h["x-api-key"] = api_key
+        return h
 
     def translate_request(
         self, *, model: str, messages: list[dict], tools: list[dict]
@@ -436,12 +476,20 @@ class AnthropicProvider(Provider):
 
     def probe(self, api_key: str, *, timeout: float = 10.0) -> ProbeResult:
         import httpx
+        base = self._effective_base_url()
+        token = self._auth_token()
+        if token:
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "anthropic-version": "2023-06-01",
+            }
+        else:
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            }
         try:
-            r = httpx.get(
-                "https://api.anthropic.com/v1/models",
-                headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
-                timeout=timeout,
-            )
+            r = httpx.get(f"{base}/v1/models", headers=headers, timeout=timeout)
         except httpx.RequestError as e:
             return ProbeResult(False, f"connection error: {type(e).__name__}")
         if r.status_code == 200:
